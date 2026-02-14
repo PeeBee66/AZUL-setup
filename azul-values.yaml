@@ -1,0 +1,798 @@
+# AZUL Application Values - Homelab (KUBS Cluster)
+# Release Name: azul
+# Namespace: azul
+# All plugins DISABLED for initial deployment
+
+namespace:
+  create: false  # Already created manually
+  secure: false  # Talos PodSecurity handles this
+  labels: {}
+
+imagePullSecrets: []
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+storageClassName: "local-path"
+
+# CA cert for trusting OpenSearch self-signed cert
+CACertificateConfigMap: "azul-ca-cert"
+
+# Disable network policies for homelab
+networkPolicy: false
+istioEnabled: false
+disableNetworkPolicies: []
+customNetworkPolicies: []
+
+# Resource limits for homelab
+limitRange:
+  enabled: true
+  spec:
+    limits:
+      - defaultRequest:
+          cpu: 10m
+          memory: "200Mi"
+        default:
+          cpu: 500m
+          memory: "1Gi"
+        type: Container
+
+# Disable HPAs for single-replica homelab
+coreHPA:
+  averageUtilization: 100
+  maxReplicas: 1
+  minReplicas: 1
+
+pluginHPA:
+  maxReplicas: 1
+  minReplicas: 1
+  averageUtilization: 100
+  useSmartScaler: false
+
+pluginSyncHPA:
+  maxReplicas: 1
+  minReplicas: 1
+  averageUtilization: 100
+  useSmartScaler: false
+
+# Use example secrets for demo
+createExampleSecrets: false
+
+secrets:
+  filestore: "s3-keys"
+  redis: "redis"
+  metastoreCreds: "metastore-creds"
+  assemblylineReceiver: "assemblyline-receiver"
+  virustotalCreds: "virustotal-creds"
+  backupS3Keys: "s3-backup-keys"
+  azulStats: "azul-stats"
+
+# External service endpoints
+external:
+  opensearch:
+    endpoint: "https://azul-opensearch.azul-infra.svc:9200"
+    username: "azul_writer"
+    partition: "default01"
+    versionSuffix: "0"
+  filestore:
+    backend: "s3"
+    endpoint: "s3-store-minio.azul-infra.svc:9000"
+    location: "azul"
+    secure: false
+    region: ""
+    xorEncoding: false
+  kafka:
+    endpoint: "azul-kafka-kafka-bootstrap.azul-infra.svc:9092"
+    topicPrefix: "default01"
+    topicDefaultReplicas: 1
+    topicDefaultPartitions: 1
+    topics: []
+  redis:
+    endpoint: "azul-redis-master:6379"
+  loki:
+    endpoint: ""
+  services: {}
+
+# Redis (required component)
+redis:
+  enabled: true
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  pvcSize: "1Gi"
+  annotations: {}
+  persistentVolumeClaimRetentionPolicy:
+    enabled: true
+    whenScaled: Retain
+    whenDeleted: Retain
+
+# Monitoring disabled (no Grafana for AZUL)
+monitoring:
+  enabled: false
+
+# Audit forwarder disabled
+auditForwarder:
+  enabled: false
+
+# Smart string filter - disable for minimal deploy
+apiServices:
+  smartStringFilter:
+    enabled: false
+
+# Stats disabled
+stats:
+  enabled: false
+
+# Burrow disabled (Kafka consumer lag monitor)
+burrow:
+  enabled: false
+
+# Scaler disabled
+scaler:
+  enabled: false
+
+# Backup/recovery - uses external MinIO on host (docker-compose-backup.yaml)
+# Mode: "off" (default), "backup" (continuous), "restore" (one-shot job)
+# The backup script (azul-backup.sh) toggles mode to "backup" when running.
+recovery:
+  mode: "off"
+  restoreType: "all"
+  externalS3Endpoint: "192.168.66.41:9100"
+  externalS3Secure: "false"
+  enableAutomaticAgeoff: false
+  enableAutomaticAgeoffCleanup: true
+  label: "01"
+  bucketNamePrefix: "azul-backup-"
+  backup:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "10m"
+      limits:
+        memory: "2Gi"
+        cpu: "500m"
+  restore:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "10m"
+      limits:
+        memory: "2Gi"
+        cpu: "500m"
+
+# Docs (lightweight, keep it)
+docs:
+  resources:
+    requests:
+      memory: "100Mi"
+      cpu: "50m"
+    limits:
+      memory: "200Mi"
+      cpu: "100m"
+
+# Web UI
+web:
+  ingress:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: 512m
+    hosts:
+      - "azul.kp.local"
+    ingressClassName: "nginx"
+    secretName: "azul-web-tls"
+    security:
+      enableHarden: true
+      csp:
+        webui:
+          connect-src: "'self' https:"
+          worker-src: "'self' blob:"
+          manifest-src: "'self'"
+          object-src: "blob:"
+          frame-src: "blob:"
+          img-src: "'self' blob:"
+          script-src: "'self' 'unsafe-inline'"
+          script-src-attr: "'unsafe-inline'"
+          style-src: "'self' 'unsafe-inline'"
+        api:
+          connect-src: "'self' https:"
+          script-src: "'self' 'unsafe-inline'"
+        docs:
+          worker-src: "'self'"
+          img-src: "'self' data:"
+          script-src: "'self' 'unsafe-inline' 'unsafe-eval'"
+          style-src: "'self' 'unsafe-inline'"
+  config:
+    deployment_title: Azul Homelab
+    deployment_back_colour: "#0f0f0f"
+    deployment_colour: "#ffffff"
+    deployment_text: "Homelab"
+    motd_body: "Welcome to the AZUL Malware Repository - Homelab Instance"
+    motd_footer: Close
+    motd_header: AZUL Homelab
+    motd_hours: 168
+    unauthorized_help: Please contact the system administrator.
+    deployment_alticon: false
+  replicas: 1
+  pdb:
+    enabled: false
+
+# Dispatcher - reduced resources for homelab
+dispatcher:
+  ingress:
+    enabled: false
+  sessionAffinity: ClientIP
+  config:
+    metastore:
+      events:
+        replicas: 1
+        pdb:
+          enabled: false
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+          DP.EVENTS.DEDUPE_CACHE_BYTES: "10Mi"
+      streams:
+        replicas: 1
+        pdb:
+          enabled: false
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+          DP.STREAMS.API_ALLOW_DELETE: "true"
+    plugin:
+      events:
+        replicas: 1
+        pdb:
+          enabled: false
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+          DP.EVENTS.DEDUPE_CACHE_BYTES: "10Mi"
+          DP.EVENTS.REPLAY_PLUGIN_CACHE.SIZE_BYTES: "10Mi"
+          DP.EVENTS.REPLAY_PLUGIN_CACHE.MIN_RUNTIME_SECONDS: "10"
+      streams:
+        replicas: 1
+        pdb:
+          enabled: false
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+          DP.STREAMS.CACHE.SIZE_BYTES: "50Mi"
+          DP.STREAMS.CACHE.SHARDS: 32
+          DP.STREAMS.API_ALLOW_DELETE: "false"
+
+# Lost tasks
+lostTasks:
+  args: ["lost-tasks"]
+  replicas: 1
+  env: {}
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "100m"
+
+# Migration disabled
+migration:
+  kafka:
+    enabled: false
+
+# Metastore - single node OpenSearch, no replicas
+metastore:
+  status_index:
+    number_of_shards: 1
+    number_of_replicas: 0
+  plugin_index:
+    number_of_shards: 1
+    number_of_replicas: 0
+  env: {}
+  instances:
+    ageoff:
+      error_log: true
+      minReplicas: 1
+      maxReplicas: 1
+      command:
+        - azul-metastore
+        - age-off
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+    ingest-binary:
+      error_log: true
+      minReplicas: 1
+      maxReplicas: 1
+      command:
+        - azul-metastore
+        - ingest-binary
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+    ingest-plugin:
+      error_log: true
+      minReplicas: 1
+      maxReplicas: 1
+      command:
+        - azul-metastore
+        - ingest-plugin
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+    ingest-status:
+      error_log: true
+      minReplicas: 1
+      maxReplicas: 1
+      command:
+        - azul-metastore
+        - ingest-status
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+
+# REST API
+restapi:
+  minReplicas: 1
+  maxReplicas: 1
+  pdb:
+    enabled: false
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "200m"
+    limits:
+      memory: "2Gi"
+      cpu: "500m"
+  logPvcSize: "1Gi"
+  purgePvcSize: "1Gi"
+  cors:
+    allowOrigins: "[]"
+    allowCredentials: "false"
+    allowMethods: "[]"
+    allowHeaders: "[]"
+  oidc:
+    rolesKey: "roles"
+    usernameKey: "preferred_username"
+    cacheTTL: "600"
+    swaggerRedirectUrl: "/api/oauth2-redirect"
+  config:
+    ca_bundle: "/cafile/ca.crt"
+    host: "0.0.0.0"
+    port: "8000"
+    processWorkers: 2
+    asyncioWorkers: 2
+    logLevel: "info"
+  env: {}
+
+# OIDC / Security
+security:
+  admin_roles:
+    - azul_admin
+  oidc:
+    enabled: true
+    authority_url: "https://keycloak-azul.kp.local/realms/azul"
+    client_id: "azul-web"
+    scopes: "openid profile offline_access roles azul"
+
+  labels:
+    classification:
+      title: Classification
+      options:
+        - name: OFFICIAL
+          priority: "0"
+    caveat:
+      title: Caveat
+      options: []
+    releasability:
+      title: Releasability
+      prefix: "REL:"
+      origin: ""
+      options: []
+    tlp:
+      title: TLP
+      options:
+        - name: TLP:CLEAR
+        - name: TLP:GREEN
+        - name: TLP:AMBER
+        - name: TLP:AMBER+STRICT
+          enforce_security: true
+
+  allow_releasability_priority_gte: "0"
+  minimumRequiredAccess:
+    - OFFICIAL
+  default: OFFICIAL TLP:CLEAR
+  presets:
+    - OFFICIAL TLP:AMBER+STRICT
+    - OFFICIAL TLP:AMBER
+    - OFFICIAL TLP:GREEN
+    - OFFICIAL TLP:CLEAR
+
+# At least one source required
+sources:
+  testing:
+    partition_unit: all
+    description: Files submitted during testing of Azul
+    exclude_from_backup: true
+    elastic:
+      number_of_replicas: 0
+      number_of_shards: 1
+    icon_class: trash-alt
+    references:
+      - description: Local submitter or point of contact
+        name: user
+        required: true
+        highlight: true
+    kafka:
+      config:
+        segment.bytes: "1073741824"
+  samples:
+    partition_unit: all
+    description: Generic source for miscellaneous samples
+    elastic:
+      number_of_replicas: 0
+      number_of_shards: 1
+    icon_class: bug
+    references:
+      - description: Short description of samples
+        name: description
+        required: true
+      - description: Submitter or point of contact
+        name: user
+        required: false
+        highlight: true
+
+# GLOBAL plugin toggle
+pluginsEnabled: true
+pluginConfig: {}
+
+plugins:
+  # === DISABLED (require external services, APIs, or large storage) ===
+
+  assemblyline:
+    type: standard
+    enabled: false
+    plugins: {}
+
+  dynamic:
+    type: standard
+    enabled: false
+    plugins: {}
+
+  nsrl:
+    type: standard
+    enabled: false
+    server:
+      enabled: false
+    plugins: {}
+
+  retrohunt:
+    type: standard
+    enabled: false
+    plugins: {}
+
+  report-feeds:
+    type: reportFeeds
+    enabled: false
+
+  virustotal:
+    type: standard
+    enabled: false
+    plugins: {}
+
+  # === ENABLED ===
+
+  # Office document analysis (8 plugins, all use plugin-office image)
+  office:
+    type: standard
+    enabled: true
+    plugins:
+      office-dde:
+        image: plugin-office
+        command:
+          - "azul-plugin-dde"
+      office-decrypt:
+        image: plugin-office
+        command:
+          - "azul-plugin-officedecrypt"
+      office-macros:
+        image: plugin-office
+        command:
+          - "azul-plugin-macros"
+      office-mimeinfo:
+        image: plugin-office
+        command:
+          - "azul-plugin-mimeinfo"
+      office-oleinfo:
+        image: plugin-office
+        command:
+          - "azul-plugin-oleinfo"
+      office-openxmlinfo:
+        image: plugin-office
+        command:
+          - "azul-plugin-openxmlinfo"
+      office-rtfinfo:
+        image: plugin-office
+        command:
+          - "azul-plugin-rtfinfo"
+      office-sylk:
+        image: plugin-office
+        command:
+          - "azul-plugin-sylk"
+
+  # Apache Tika metadata extraction (1 pod with tika sidecar)
+  tika:
+    type: standard
+    enabled: true
+    plugins:
+      tika:
+        extraContainers:
+          server:
+            template: "plugin.container.main"
+            image: tika_external
+            resources:
+              requests:
+                memory: "200Mi"
+                cpu: "10m"
+              limits:
+                memory: "1Gi"
+                cpu: "500m"
+        args:
+          - "--config"
+          - "tika_server"
+          - "http://localhost:9998"
+        resources:
+          requests:
+            memory: "200Mi"
+            cpu: "10m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+  # Generic analysis plugins (40 plugins)
+  generic:
+    type: standard
+    enabled: true
+    plugins:
+      alphabets:
+        tmp: "1Gi"
+      android-parser: {}
+      build-time-strings: {}
+      mandiant-capa:
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "250m"
+          limits:
+            memory: "4Gi"
+            cpu: "1"
+      certificates: {}
+      debloat:
+        tmp: "7Gi"
+      de4dot: {}
+      dotnet-decompiler: {}
+      dotnet-deob: {}
+      email-headers:
+        image: plugin-email
+        command:
+          - "azul-plugin-mail-headers"
+      email-mimedecoder:
+        image: plugin-email
+        command:
+          - "azul-plugin-mime-decoder"
+      email-olemail:
+        image: plugin-email
+        command:
+          - "azul-plugin-olemail"
+      entropy:
+        maxFileSize: "0"
+      entrypointcheck:
+        resources:
+          limits:
+            memory: "2Gi"
+      exiftool:
+        tmp: "300Mi"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "100m"
+          limits:
+            memory: "2Gi"
+            cpu: "500m"
+      export-hashes: {}
+      floss:
+        tmp: "2Gi"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "250m"
+          limits:
+            memory: "4Gi"
+            cpu: "1"
+      ghidra:
+        tmp: "1Gi"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        volumes:
+          - name: ghidra-config-cache
+            emptyDir:
+              sizeLimit: 10Mi
+        volumeMounts:
+          - name: ghidra-config-cache
+            mountPath: /home/azul/.config
+      goinfo: {}
+      image-convert: {}
+      index-coincidence: {}
+      js-deobf: {}
+      lief-elf:
+        image: plugin-lief
+        command:
+          - "azul-plugin-lief-elf"
+      lief-fatmacho:
+        image: plugin-lief
+        command:
+          - "azul-plugin-fat-macho"
+      lief-macho:
+        image: plugin-lief
+        command:
+          - "azul-plugin-lief-macho"
+      lief-pe:
+        image: plugin-lief
+        command:
+          - "azul-plugin-lief-pe"
+      lookback-hash:
+        image: plugin-lookback
+        command:
+          - "azul-plugin-lookback-hash"
+      lookback-search:
+        image: plugin-lookback
+        command:
+          - "azul-plugin-lookback-search"
+      malcarve:
+        args:
+          - "--config"
+          - "plugin_depth_limit"
+          - "3"
+          - "--config"
+          - "plugin_depth_authors"
+          - "Malcarve"
+      netinfo: {}
+      pdftools-pdfid:
+        image: plugin-pdftools
+        command:
+          - "azul-plugin-pdfid"
+      pdftools-pdfinfo:
+        image: plugin-pdftools
+        command:
+          - "azul-plugin-pdfinfo"
+      pdftools-pdftext:
+        image: plugin-pdftools
+        command:
+          - "azul-plugin-pdftext"
+      portex:
+        volumes:
+          - name: fontconfig-cache
+            emptyDir:
+              sizeLimit: 200Mi
+        volumeMounts:
+          - name: fontconfig-cache
+            mountPath: /var/cache/fontconfig
+        env:
+          - name: XDG_CACHE_HOME
+            value: /var/cache/fontconfig
+      qrcode: {}
+      python: {}
+      repeated-bytes:
+        tmp: "1Gi"
+      richid: {}
+      script-decoder:
+        tmp: "1Gi"
+      shortcut:
+        tmp: "1Gi"
+      unbox:
+        maxFileSize: "1000000000"
+        tmp: "4Gi"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "200m"
+          limits:
+            memory: "4Gi"
+            cpu: "500m"
+        config:
+          PLUGIN_FILTER_MAX_CONTENT_SIZE: "4GiB"
+
+  # YARA-X rule scanning with public rules repo
+  yara-x:
+    type: yara-x
+    image: plugin-yara
+    enabled: true
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "100m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+    # No sources configured yet - public YARA rule repos (e.g. Yara-Rules/rules)
+    # use classic YARA syntax incompatible with YARA-X compiler.
+    # Add YARA-X compatible rule sources here when available.
+    sources: {}
+
+  # Suricata rule scanning (enabled, no sources yet)
+  suricata:
+    type: suricata
+    image: plugin-suricata
+    enabled: true
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "100m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+    sources: {}
+
+  # MACO extractor (enabled, no extractor sources yet)
+  maco:
+    type: maco
+    image: plugin-maco
+    enabled: true
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "100m"
+      limits:
+        memory: "2Gi"
+        cpu: "500m"
+    sources: {}
+
+# Use default image registry
+images:
+  pullPolicy: Always
+  customRegistry: docker.io/asdazul/

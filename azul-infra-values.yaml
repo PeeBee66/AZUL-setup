@@ -1,0 +1,665 @@
+# AZUL Infrastructure Values - Homelab (KUBS Cluster)
+# Release Name: AZUL-Infra
+# Namespace: azul-infra
+# Adapted for: single-node components, local-path storage, nginx ingress
+
+imagePullSecrets: []
+tolerations: []
+affinity: {}
+podAnnotations: {}
+networkPolicy:
+  enabled: false
+istioEnabled: false
+disableNetworkPolicies: []
+customNetworkPolicies: []
+
+# ============================================================
+# MinIO - S3-compatible object storage (single instance, no backup)
+# ============================================================
+minio:
+  main:
+    enable: true
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    secretName: s3-keys
+    # Single replica for homelab (no distributed mode)
+    replicas: 1
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "250m"
+      limits:
+        memory: "2Gi"
+        cpu: "500m"
+    labels:
+      app: s3-store-minio
+      storage: minio-disk
+      allow-ingress-minio: "true"
+      allow-connect-minio-cluster: "true"
+    storageClass: local-path
+    requests:
+      storage: 10Gi
+    ingress:
+      api:
+        enable: true
+        host: "minio-api-azul.kp.local"
+      console:
+        enable: true
+        host: "minio-azul.kp.local"
+      ingressClassName: "nginx"
+      secretName: "minio-tls"
+      annotations: {}
+
+  # Backup MinIO disabled for homelab
+  backup:
+    enable: false
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    secretName: s3-backup-keys
+    replicas: 1
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "250m"
+    labels:
+      app: s3-store-minio-backup
+      storage: minio-disk-backup
+      allow-ingress-minio: "true"
+      allow-connect-minio-cluster: "true"
+    storageClass: local-path
+    requests:
+      storage: 5Gi
+    ingress:
+      api:
+        enable: false
+        host: "minio-backup-api-azul.kp.local"
+      console:
+        enable: false
+        host: "minio-backup-azul.kp.local"
+      ingressClassName: "nginx"
+      secretName: "minio-backup-tls"
+      annotations: {}
+
+# ============================================================
+# OpenSearch - Search & indexing (single node for homelab)
+# ============================================================
+opensearch:
+  enable: true
+  name: azul-opensearch
+
+  harden: false
+
+  general:
+    version: 3.2.0
+    replicas: 1
+    setVMMaxMapCount: true
+    additionalConfig: {}
+
+  nodes:
+    diskSize: "20Gi"
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "500m"
+
+  selfSigned: true
+  certificateSuffix: opensearch
+
+  adminCredentialsSecret: azul-cluster-admincredentials
+  dashboardCredentialsSecret: azul-cluster-dashboardcredentials
+
+  # Additional certs are appended as separate keys in the opensearch-certs configmap.
+  # NOTE: For self-signed Keycloak TLS (homelab), the Test CA must also be appended
+  # to the 'ca-certificates' key in the configmap for OIDC JWT validation to work.
+  # This is done via a post-install step (see AZUL-INSTALL-LOG.md section 1.7.6).
+  additionalCerts: {}
+
+  ingress:
+    enable: false
+    ingressClassName: nginx
+    host: opensearch-azul.kp.local
+    secretName: "opensearch-tls"
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+      nginx.ingress.kubernetes.io/proxy-body-size: "600m"
+      nginx.org/client-max-body-size: "600m"
+
+  dashboard:
+    version: 3.2.0
+    ingress:
+      enable: true
+      ingressClassName: nginx
+      host: opensearch-azul.kp.local
+      secretName: "dashboard-ingress-tls"
+      annotations: {}
+    env:
+      - name: NODE_EXTRA_CA_CERTS
+        value: /usr/share/opensearch-dashboards/certs/ca.crt
+    additionalVolumes:
+      - name: keycloak-ca-cert
+        path: /usr/share/opensearch-dashboards/certs
+        secret:
+          secretName: azul-opensearch-ca-cert
+          items:
+            - key: ca.crt
+              path: ca.crt
+        restartPods: true
+    additionalConfig:
+      opensearch_security.multitenancy.enabled: "true"
+      opensearch_security.multitenancy.tenants.preferred: '["Private", "Global"]'
+      opensearch_security.readonly_mode.roles: '["kibana_read_only"]'
+      opensearch_security.auth.multiple_auth_enabled: "true"
+      opensearch_security.auth.type: '["basicauth","openid"]'
+      opensearch_security.openid.connect_url: "https://keycloak-azul.kp.local/realms/azul/.well-known/openid-configuration"
+      opensearch_security.openid.client_id: "opensearch-dashboards"
+      opensearch_security.openid.client_secret: "opensearch-dashboards-secret"
+      opensearch_security.openid.scope: "openid profile email azul"
+      opensearch_security.openid.base_redirect_url: "https://opensearch-azul.kp.local"
+
+  internalUsers:
+    _meta:
+      type: "internalusers"
+      config_version: 2
+    admin:
+      hash: "$2a$12$u7h.fuRJdjoxYgoRlSKJbuONpXKhaD1oCQKowFJGgdLqY1UXmBUfW"
+      reserved: true
+      backend_roles:
+        - "admin"
+      description: "admin user"
+    kibanaserver:
+      hash: "$2a$12$vtYtqDCbUXuXAnMPBstDjuTgZRvPsr2k4Z4N5FeYQX7qTfzRb8r/a"
+      reserved: true
+    monitor:
+      hash: "$2a$12$u7h.fuRJdjoxYgoRlSKJbuONpXKhaD1oCQKowFJGgdLqY1UXmBUfW"
+      description: "Exporter monitoring"
+    azul_writer:
+      hash: "$2b$12$1eNiadFjer/XMAYpcIU0se5GvfTUTu1fktgf1VsjR2XZqJJenBOve"
+      backend_roles:
+        - "azul_write"
+      description: "Service account for metastore writer"
+
+  roleMapping:
+    _meta:
+      type: "rolesmapping"
+      config_version: 2
+    azul_read:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_read"
+        - "azul_read_indirect"
+        - "azul-access"
+      description: "Maps azul_read role"
+    azul-fill1:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_read"
+      description: "fix SG 900D error"
+    azul-fill2:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_read"
+      description: "fix SG 900D error"
+    azul-fill3:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_read"
+      description: "fix SG 900D error"
+    azul-fill4:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_read"
+      description: "fix SG 900D error"
+    azul-fill5:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_read"
+      description: "fix SG 900D error"
+    s-any:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_read"
+        - "azul-access"
+      description: "Map"
+    s-official:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_read"
+        - "azul-access"
+      description: "Map"
+    azul_admin:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_admin"
+      description: "Maps azul_admin role"
+    azul_write:
+      reserved: false
+      hidden: false
+      backend_roles:
+        - "azul_write"
+      description: "Maps azul_write role"
+    monitor:
+      reserved: false
+      hidden: false
+      users:
+        - "monitor"
+      description: "Maps monitor user to monitor role"
+    all_access:
+      reserved: true
+      backend_roles:
+        - "admin"
+      description: "Maps admin to all_access"
+    readall:
+      reserved: true
+      backend_roles:
+        - "readall"
+    kibana_server:
+      reserved: true
+      users:
+        - "kibanaserver"
+    logstash:
+      reserved: false
+      backend_roles:
+        - "logstash"
+    kibana_user:
+      reserved: false
+      backend_roles:
+        - "kibanauser"
+      description: "Maps kibanauser to kibana_user"
+    manage_snapshots:
+      reserved: false
+      backend_roles:
+        - "snapshotrestore"
+
+  roles:
+    _meta:
+      type: "roles"
+      config_version: 2
+    s-any:
+      reserved: false
+      hidden: false
+      static: false
+    s-official:
+      reserved: false
+      hidden: false
+      static: false
+    azul_read:
+      reserved: false
+      hidden: false
+      static: false
+      cluster_permissions:
+        - "indices:data/read/*"
+        - "kibana_user"
+      index_permissions:
+        - index_patterns:
+            - "*"
+          allowed_actions:
+            - "indices:admin/resolve/index"
+        - index_patterns:
+            - "azul.*"
+          allowed_actions:
+            - "indices:admin/get"
+            - "indices:admin/analyze"
+        - index_patterns:
+            - "azul.x.*"
+          allowed_actions:
+            - "read"
+          dls: '{"bool": {"filter": [{"terms": {"encoded_security.inclusive": [${user.securityRoles}]}}, {"terms_set": {"encoded_security.exclusive": {"terms": [${user.securityRoles}], "minimum_should_match_field": "encoded_security.num_exclusive"}}}]}}'
+        - index_patterns:
+            - "azul.o.*"
+          allowed_actions:
+            - "read"
+      tenant_permissions:
+        - tenant_patterns:
+            - "azul"
+          allowed_actions:
+            - "kibana_all_write"
+    azul-fill1:
+      reserved: false
+      hidden: false
+      static: false
+    azul-fill2:
+      reserved: false
+      hidden: false
+      static: false
+    azul-fill3:
+      reserved: false
+      hidden: false
+      static: false
+    azul-fill4:
+      reserved: false
+      hidden: false
+      static: false
+    azul-fill5:
+      reserved: false
+      hidden: false
+      static: false
+    azul_admin:
+      reserved: false
+      hidden: false
+      static: false
+      cluster_permissions:
+        - "cluster_monitor"
+        - "cluster:admin/script/*"
+        - "indices:admin/index_template/*"
+        - "indices:admin/mapping/*"
+        - "indices:admin/template/*"
+        - "indices:data/read/*"
+        - "indices:data/write/bulk"
+        - "kibana_user"
+      index_permissions:
+        - index_patterns:
+            - "azul.*"
+          allowed_actions:
+            - "unlimited"
+        - index_patterns:
+            - "virustotal*"
+          allowed_actions:
+            - "unlimited"
+      tenant_permissions:
+        - tenant_patterns:
+            - "azul"
+            - "global_tenant"
+          allowed_actions:
+            - "kibana_all_write"
+    azul_write:
+      reserved: false
+      hidden: false
+      static: false
+      cluster_permissions:
+        - "cluster_monitor"
+        - "cluster:admin/script/*"
+        - "indices:admin/index_template/*"
+        - "indices:admin/mapping/*"
+        - "indices:admin/template/*"
+        - "indices:data/read/*"
+        - "indices:data/write/bulk"
+        - "kibana_user"
+      index_permissions:
+        - index_patterns:
+            - "azul.*"
+          allowed_actions:
+            - "unlimited"
+    monitor:
+      reserved: false
+      hidden: false
+      static: false
+      cluster_permissions:
+        - "cluster_monitor"
+      index_permissions:
+        - index_patterns:
+            - "*"
+          allowed_actions:
+            - "indices_monitor"
+    kibana_read_only:
+      reserved: true
+    security_rest_api_access:
+      reserved: true
+    alerting_read_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/alerting/alerts/get"
+        - "cluster:admin/opendistro/alerting/destination/get"
+        - "cluster:admin/opendistro/alerting/monitor/get"
+        - "cluster:admin/opendistro/alerting/monitor/search"
+    alerting_ack_alerts:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/alerting/alerts/*"
+    alerting_full_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster_monitor"
+        - "cluster:admin/opendistro/alerting/*"
+      index_permissions:
+        - index_patterns:
+            - "*"
+          allowed_actions:
+            - "indices_monitor"
+            - "indices:admin/aliases/get"
+            - "indices:admin/mappings/get"
+    anomaly_read_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/ad/detector/info"
+        - "cluster:admin/opendistro/ad/detector/search"
+        - "cluster:admin/opendistro/ad/detectors/get"
+        - "cluster:admin/opendistro/ad/result/search"
+        - "cluster:admin/opendistro/ad/tasks/search"
+    anomaly_full_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster_monitor"
+        - "cluster:admin/opendistro/ad/*"
+      index_permissions:
+        - index_patterns:
+            - "*"
+          allowed_actions:
+            - "indices_monitor"
+            - "indices:admin/aliases/get"
+            - "indices:admin/mappings/get"
+    notebooks_read_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/notebooks/list"
+        - "cluster:admin/opendistro/notebooks/get"
+    notebooks_full_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/notebooks/create"
+        - "cluster:admin/opendistro/notebooks/update"
+        - "cluster:admin/opendistro/notebooks/delete"
+        - "cluster:admin/opendistro/notebooks/get"
+        - "cluster:admin/opendistro/notebooks/list"
+    reports_instances_read_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/reports/instance/list"
+        - "cluster:admin/opendistro/reports/instance/get"
+        - "cluster:admin/opendistro/reports/menu/download"
+    reports_read_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/reports/definition/get"
+        - "cluster:admin/opendistro/reports/definition/list"
+        - "cluster:admin/opendistro/reports/instance/list"
+        - "cluster:admin/opendistro/reports/instance/get"
+        - "cluster:admin/opendistro/reports/menu/download"
+    reports_full_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/reports/definition/create"
+        - "cluster:admin/opendistro/reports/definition/update"
+        - "cluster:admin/opendistro/reports/definition/on_demand"
+        - "cluster:admin/opendistro/reports/definition/delete"
+        - "cluster:admin/opendistro/reports/definition/get"
+        - "cluster:admin/opendistro/reports/definition/list"
+        - "cluster:admin/opendistro/reports/instance/list"
+        - "cluster:admin/opendistro/reports/instance/get"
+        - "cluster:admin/opendistro/reports/menu/download"
+    asynchronous_search_full_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/asynchronous_search/*"
+      index_permissions:
+        - index_patterns:
+            - "*"
+          allowed_actions:
+            - "indices:data/read/search*"
+    asynchronous_search_read_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/asynchronous_search/get"
+    index_management_full_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/opendistro/ism/*"
+        - "cluster:admin/opendistro/rollup/*"
+        - "cluster:admin/opendistro/transform/*"
+      index_permissions:
+        - index_patterns:
+            - "*"
+          allowed_actions:
+            - "indices:admin/opensearch/ism/*"
+    cross_cluster_replication_leader_full_access:
+      reserved: true
+      index_permissions:
+        - index_patterns:
+            - "*"
+          allowed_actions:
+            - "indices:admin/plugins/replication/index/setup/validate"
+            - "indices:data/read/plugins/replication/changes"
+            - "indices:data/read/plugins/replication/file_chunk"
+    cross_cluster_replication_follower_full_access:
+      reserved: true
+      cluster_permissions:
+        - "cluster:admin/plugins/replication/autofollow/update"
+      index_permissions:
+        - index_patterns:
+            - "*"
+          allowed_actions:
+            - "indices:admin/plugins/replication/index/setup/validate"
+            - "indices:data/write/plugins/replication/changes"
+            - "indices:admin/plugins/replication/index/start"
+            - "indices:admin/plugins/replication/index/pause"
+            - "indices:admin/plugins/replication/index/resume"
+            - "indices:admin/plugins/replication/index/stop"
+            - "indices:admin/plugins/replication/index/update"
+            - "indices:admin/plugins/replication/index/status_check"
+
+  securityConfig:
+    _meta:
+      type: "config"
+      config_version: 2
+    config:
+      dynamic:
+        kibana:
+          private_tenant_enabled: false
+        http:
+          anonymous_auth_enabled: false
+        authc:
+          basic_internal_auth_domain:
+            description: "Authenticate via HTTP Basic against internal users database"
+            http_enabled: true
+            transport_enabled: true
+            order: 0
+            http_authenticator:
+              type: basic
+              challenge: false
+            authentication_backend:
+              type: intern
+          openid_auth_domain:
+            description: "Authenticate via Keycloak OIDC"
+            http_enabled: true
+            transport_enabled: true
+            order: 1
+            http_authenticator:
+              type: openid
+              challenge: false
+              config:
+                subject_key: preferred_username
+                roles_key: roles
+                openid_connect_url: "https://keycloak-azul.kp.local/realms/azul/.well-known/openid-configuration"
+                openid_connect_idp:
+                  enable_ssl: true
+                  verify_hostnames: false
+                  pemtrustedcas_filepath: "/usr/share/opensearch/config/certs/ca-certificates"
+            authentication_backend:
+              type: noop
+
+# ============================================================
+# Kafka - Event store (single broker for homelab)
+# ============================================================
+kafka:
+  enable: true
+  name: azul-kafka
+  version: 4.0.0
+  metadataVersion: 4.0-IV3
+
+  # Single broker for homelab
+  replicas: 1
+  resources:
+    requests:
+      memory: 2Gi
+      cpu: 500m
+    limits:
+      memory: 2Gi
+      cpu: 1000m
+  jvmOptions:
+    -Xms: 1g
+    -Xmx: 1g
+
+  kafkactl:
+    enable: true
+    image: deviceinsight/kafkactl:v5.13.0-ubuntu
+
+  storage:
+    type: persistent-claim
+    size: 20Gi
+    kraftMetadata: shared
+    deleteClaim: false
+    class: local-path
+
+  matchAgentPool: ""
+  antiAgentPool: ""
+
+  # Adjusted for single broker
+  clusterConfig:
+    offsets.topic.replication.factor: 1
+    transaction.state.log.replication.factor: 1
+    transaction.state.log.min.isr: 1
+    auto.create.topics.enable: false
+    default.replication.factor: 1
+    min.insync.replicas: 1
+    num.io.threads: 8
+    num.network.threads: 5
+    num.partitions: 4
+    num.replica.fetchers: 2
+    socket.request.max.bytes: 104857600
+    unclean.leader.election.enable: true
+    message.max.bytes: 4194352
+    compression.type: snappy
+
+# ============================================================
+# Keycloak - OIDC Authentication
+# ============================================================
+keycloak:
+  enable: true
+  image: quay.io/keycloak/keycloak:26.1
+  proxyHeaderArg: xforwarded
+  ingress:
+    hostname: "keycloak-azul.kp.local"
+    ingressClassName: nginx
+    secretName: keycloak-tls
+    annotations: {}
+  postgres:
+    storageClassName: "local-path"
+    size: 5Gi
+
+# ============================================================
+# Monitoring - DISABLED for homelab (resource savings)
+# ============================================================
+kube-prometheus-stack:
+  enable: false
+
+loki:
+  enable: false
+
+prometheus-blackbox-exporter:
+  enable: false
+
+prometheus-pushgateway:
+  enable: false

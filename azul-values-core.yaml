@@ -1,0 +1,494 @@
+# AZUL Application Values - Homelab (KUBS Cluster) - CORE ONLY
+# Release Name: azul
+# Namespace: azul
+# Plugins DISABLED - use azul-values.yaml for full deploy with plugins
+
+namespace:
+  create: false  # Already created manually
+  secure: false  # Talos PodSecurity handles this
+  labels: {}
+
+imagePullSecrets: []
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+storageClassName: "local-path"
+
+# CA cert for trusting OpenSearch self-signed cert
+CACertificateConfigMap: "azul-ca-cert"
+
+# Disable network policies for homelab
+networkPolicy: false
+istioEnabled: false
+disableNetworkPolicies: []
+customNetworkPolicies: []
+
+# Resource limits for homelab
+limitRange:
+  enabled: true
+  spec:
+    limits:
+      - defaultRequest:
+          cpu: 10m
+          memory: "200Mi"
+        default:
+          cpu: 500m
+          memory: "1Gi"
+        type: Container
+
+# Disable HPAs for single-replica homelab
+coreHPA:
+  averageUtilization: 100
+  maxReplicas: 1
+  minReplicas: 1
+
+pluginHPA:
+  maxReplicas: 1
+  minReplicas: 1
+  averageUtilization: 100
+  useSmartScaler: false
+
+pluginSyncHPA:
+  maxReplicas: 1
+  minReplicas: 1
+  averageUtilization: 100
+  useSmartScaler: false
+
+# Use example secrets for demo
+createExampleSecrets: false
+
+secrets:
+  filestore: "s3-keys"
+  redis: "redis"
+  metastoreCreds: "metastore-creds"
+  assemblylineReceiver: "assemblyline-receiver"
+  virustotalCreds: "virustotal-creds"
+  backupS3Keys: "s3-backup-keys"
+  azulStats: "azul-stats"
+
+# External service endpoints
+external:
+  opensearch:
+    endpoint: "https://azul-opensearch.azul-infra.svc:9200"
+    username: "azul_writer"
+    partition: "default01"
+    versionSuffix: "0"
+  filestore:
+    backend: "s3"
+    endpoint: "s3-store-minio.azul-infra.svc:9000"
+    location: "azul"
+    secure: false
+    region: ""
+    xorEncoding: false
+  kafka:
+    endpoint: "azul-kafka-kafka-bootstrap.azul-infra.svc:9092"
+    topicPrefix: "default01"
+    topicDefaultReplicas: 1
+    topicDefaultPartitions: 1
+    topics: []
+  redis:
+    endpoint: "azul-redis-master:6379"
+  loki:
+    endpoint: ""
+  services: {}
+
+# Redis (required component)
+redis:
+  enabled: true
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  pvcSize: "1Gi"
+  annotations: {}
+  persistentVolumeClaimRetentionPolicy:
+    enabled: true
+    whenScaled: Retain
+    whenDeleted: Retain
+
+# Monitoring disabled (no Grafana for AZUL)
+monitoring:
+  enabled: false
+
+# Audit forwarder disabled
+auditForwarder:
+  enabled: false
+
+# Smart string filter - disable for minimal deploy
+apiServices:
+  smartStringFilter:
+    enabled: false
+
+# Stats disabled
+stats:
+  enabled: false
+
+# Burrow disabled (Kafka consumer lag monitor)
+burrow:
+  enabled: false
+
+# Scaler disabled
+scaler:
+  enabled: false
+
+# Backup/recovery - uses external MinIO on host (docker-compose-backup.yaml)
+# Mode: "off" (default), "backup" (continuous), "restore" (one-shot job)
+# The backup script (azul-backup.sh) toggles mode to "backup" when running.
+recovery:
+  mode: "off"
+  restoreType: "all"
+  externalS3Endpoint: "192.168.66.41:9100"
+  externalS3Secure: "false"
+  enableAutomaticAgeoff: false
+  enableAutomaticAgeoffCleanup: true
+  label: "01"
+  bucketNamePrefix: "azul-backup-"
+  backup:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "10m"
+      limits:
+        memory: "2Gi"
+        cpu: "500m"
+  restore:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "10m"
+      limits:
+        memory: "2Gi"
+        cpu: "500m"
+
+# Docs (lightweight, keep it)
+docs:
+  resources:
+    requests:
+      memory: "100Mi"
+      cpu: "50m"
+    limits:
+      memory: "200Mi"
+      cpu: "100m"
+
+# Web UI
+web:
+  ingress:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: 512m
+    hosts:
+      - "azul.kp.local"
+    ingressClassName: "nginx"
+    secretName: "azul-web-tls"
+    security:
+      enableHarden: true
+      csp:
+        webui:
+          connect-src: "'self' https:"
+          worker-src: "'self' blob:"
+          manifest-src: "'self'"
+          object-src: "blob:"
+          frame-src: "blob:"
+          img-src: "'self' blob:"
+          script-src: "'self' 'unsafe-inline'"
+          script-src-attr: "'unsafe-inline'"
+          style-src: "'self' 'unsafe-inline'"
+        api:
+          connect-src: "'self' https:"
+          script-src: "'self' 'unsafe-inline'"
+        docs:
+          worker-src: "'self'"
+          img-src: "'self' data:"
+          script-src: "'self' 'unsafe-inline' 'unsafe-eval'"
+          style-src: "'self' 'unsafe-inline'"
+  config:
+    deployment_title: Azul Homelab
+    deployment_back_colour: "#0f0f0f"
+    deployment_colour: "#ffffff"
+    deployment_text: "Homelab"
+    motd_body: "Welcome to the AZUL Malware Repository - Homelab Instance"
+    motd_footer: Close
+    motd_header: AZUL Homelab
+    motd_hours: 168
+    unauthorized_help: Please contact the system administrator.
+    deployment_alticon: false
+  replicas: 1
+  pdb:
+    enabled: false
+
+# Dispatcher - reduced resources for homelab
+dispatcher:
+  ingress:
+    enabled: false
+  sessionAffinity: ClientIP
+  config:
+    metastore:
+      events:
+        replicas: 1
+        pdb:
+          enabled: false
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+          DP.EVENTS.DEDUPE_CACHE_BYTES: "10Mi"
+      streams:
+        replicas: 1
+        pdb:
+          enabled: false
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+          DP.STREAMS.API_ALLOW_DELETE: "true"
+    plugin:
+      events:
+        replicas: 1
+        pdb:
+          enabled: false
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+          DP.EVENTS.DEDUPE_CACHE_BYTES: "10Mi"
+          DP.EVENTS.REPLAY_PLUGIN_CACHE.SIZE_BYTES: "10Mi"
+          DP.EVENTS.REPLAY_PLUGIN_CACHE.MIN_RUNTIME_SECONDS: "10"
+      streams:
+        replicas: 1
+        pdb:
+          enabled: false
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        env:
+          DP.STREAMS.CACHE.SIZE_BYTES: "50Mi"
+          DP.STREAMS.CACHE.SHARDS: 32
+          DP.STREAMS.API_ALLOW_DELETE: "false"
+
+# Lost tasks
+lostTasks:
+  args: ["lost-tasks"]
+  replicas: 1
+  env: {}
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "100m"
+
+# Migration disabled
+migration:
+  kafka:
+    enabled: false
+
+# Metastore - single node OpenSearch, no replicas
+metastore:
+  status_index:
+    number_of_shards: 1
+    number_of_replicas: 0
+  plugin_index:
+    number_of_shards: 1
+    number_of_replicas: 0
+  env: {}
+  instances:
+    ageoff:
+      error_log: true
+      minReplicas: 1
+      maxReplicas: 1
+      command:
+        - azul-metastore
+        - age-off
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+    ingest-binary:
+      error_log: true
+      minReplicas: 1
+      maxReplicas: 1
+      command:
+        - azul-metastore
+        - ingest-binary
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+    ingest-plugin:
+      error_log: true
+      minReplicas: 1
+      maxReplicas: 1
+      command:
+        - azul-metastore
+        - ingest-plugin
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+    ingest-status:
+      error_log: true
+      minReplicas: 1
+      maxReplicas: 1
+      command:
+        - azul-metastore
+        - ingest-status
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+
+# REST API
+restapi:
+  minReplicas: 1
+  maxReplicas: 1
+  pdb:
+    enabled: false
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "200m"
+    limits:
+      memory: "2Gi"
+      cpu: "500m"
+  logPvcSize: "1Gi"
+  purgePvcSize: "1Gi"
+  cors:
+    allowOrigins: "[]"
+    allowCredentials: "false"
+    allowMethods: "[]"
+    allowHeaders: "[]"
+  oidc:
+    rolesKey: "roles"
+    usernameKey: "preferred_username"
+    cacheTTL: "600"
+    swaggerRedirectUrl: "/api/oauth2-redirect"
+  config:
+    ca_bundle: "/cafile/ca.crt"
+    host: "0.0.0.0"
+    port: "8000"
+    processWorkers: 2
+    asyncioWorkers: 2
+    logLevel: "info"
+  env: {}
+
+# OIDC / Security
+security:
+  admin_roles:
+    - azul_admin
+  oidc:
+    enabled: true
+    authority_url: "https://keycloak-azul.kp.local/realms/azul"
+    client_id: "azul-web"
+    scopes: "openid profile offline_access roles azul"
+
+  labels:
+    classification:
+      title: Classification
+      options:
+        - name: OFFICIAL
+          priority: "0"
+    caveat:
+      title: Caveat
+      options: []
+    releasability:
+      title: Releasability
+      prefix: "REL:"
+      origin: ""
+      options: []
+    tlp:
+      title: TLP
+      options:
+        - name: TLP:CLEAR
+        - name: TLP:GREEN
+        - name: TLP:AMBER
+        - name: TLP:AMBER+STRICT
+          enforce_security: true
+
+  allow_releasability_priority_gte: "0"
+  minimumRequiredAccess:
+    - OFFICIAL
+  default: OFFICIAL TLP:CLEAR
+  presets:
+    - OFFICIAL TLP:AMBER+STRICT
+    - OFFICIAL TLP:AMBER
+    - OFFICIAL TLP:GREEN
+    - OFFICIAL TLP:CLEAR
+
+# At least one source required
+sources:
+  testing:
+    partition_unit: all
+    description: Files submitted during testing of Azul
+    exclude_from_backup: true
+    elastic:
+      number_of_replicas: 0
+      number_of_shards: 1
+    icon_class: trash-alt
+    references:
+      - description: Local submitter or point of contact
+        name: user
+        required: true
+        highlight: true
+    kafka:
+      config:
+        segment.bytes: "1073741824"
+  samples:
+    partition_unit: all
+    description: Generic source for miscellaneous samples
+    elastic:
+      number_of_replicas: 0
+      number_of_shards: 1
+    icon_class: bug
+    references:
+      - description: Short description of samples
+        name: description
+        required: true
+      - description: Submitter or point of contact
+        name: user
+        required: false
+        highlight: true
+
+# GLOBAL plugin toggle — disabled for core-only deploy (Stage 2)
+# Use azul-values.yaml (with pluginsEnabled: true) for Stage 3 (plugins)
+pluginsEnabled: false
+pluginConfig: {}
+plugins: {}
+
+# Use default image registry
+images:
+  pullPolicy: Always
+  customRegistry: docker.io/asdazul/

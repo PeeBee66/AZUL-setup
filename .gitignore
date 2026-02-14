@@ -1,0 +1,8 @@
+# Sensitive credentials
+.azul-credentials
+
+# IDE / tool settings
+.claude/
+
+# Upstream azul-app repo (clone separately)
+azul-app/
