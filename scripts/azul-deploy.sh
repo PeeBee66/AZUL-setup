@@ -35,7 +35,9 @@ INFRA_CHART="${AZUL_DIR}/azul-app/infra"
 APP_CHART="${AZUL_DIR}/azul-app/azul"
 CREDS_FILE="${AZUL_DIR}/.azul-credentials"
 KEYCLOAK_SCRIPT="${AZUL_DIR}/setup-keycloak.sh"
-OPENSEARCH_CA="${AZUL_DIR}/opensearch-ca.crt"
+
+# Source certificate functions (patch_ca_into_chart, create_keycloak_cert, etc.)
+source "${AZUL_DIR}/scripts/setup-certs.sh"
 
 DISCORD_WEBHOOK="https://discord.com/api/webhooks/1469836076154884215/SRt_iwtFSJVveLipv2DZ0i6h5tCLhejiD2mlmLUCllPtSgl0CfnRQGxRvy1Lk5lPJDLJ"
 
@@ -206,6 +208,12 @@ stage_infra() {
     fi
     log "azul-infra chart deployed"
 
+    # --- 1.4b Patch Test CA into chart bundle ---
+    # cert-manager creates the CA during helm install. Patch it into the chart's
+    # ca-certificates file so all future helm upgrades include it natively.
+    wait_for_ca
+    patch_ca_into_chart
+
     # --- 1.5 Wait for infra pods ---
     log ""
     log "--- 1.5 Waiting for infrastructure pods ---"
@@ -246,10 +254,10 @@ stage_infra() {
     log "--- 1.7 Creating Keycloak TLS certificate ---"
     create_keycloak_cert
 
-    # --- 1.8 Append Test CA to OpenSearch certs ---
+    # --- 1.8 Bake Test CA into OpenSearch cert bundle ---
     log ""
-    log "--- 1.8 Adding Test CA to OpenSearch cert bundle ---"
-    append_test_ca_to_opensearch
+    log "--- 1.8 Baking Test CA into OpenSearch cert bundle ---"
+    bake_test_ca
 
     # --- 1.9 Run Keycloak setup ---
     log ""
@@ -383,36 +391,10 @@ print('\n'.join(result), end='')
     log "CoreDNS updated"
 }
 
-create_keycloak_cert() {
-    if kubectl get certificate keycloak-tls -n azul-infra >/dev/null 2>&1; then
-        log "Keycloak TLS certificate already exists"
-        return 0
-    fi
+# create_keycloak_cert() is sourced from setup-certs.sh
 
-    cat <<'EOF' | kubectl apply -f -
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: keycloak-tls
-  namespace: azul-infra
-spec:
-  secretName: keycloak-tls
-  issuerRef:
-    name: azul-opensearch-ca-issuer
-    kind: Issuer
-  dnsNames:
-    - keycloak-azul.kp.local
-  duration: 8760h
-  renewBefore: 720h
-EOF
-
-    log "Keycloak TLS certificate created, waiting for issuance..."
-    sleep 10
-    kubectl wait --for=condition=Ready certificate/keycloak-tls -n azul-infra --timeout=60s 2>/dev/null || true
-}
-
-append_test_ca_to_opensearch() {
-    # Check if already appended
+bake_test_ca() {
+    # Check if OpenSearch already has the Test CA in its cert bundle
     local has_test_ca
     has_test_ca=$(kubectl exec azul-opensearch-nodes-0 -n azul-infra -- \
         grep -c "Test CA" /usr/share/opensearch/config/certs/ca-certificates 2>/dev/null) || has_test_ca="0"
@@ -422,40 +404,19 @@ append_test_ca_to_opensearch() {
         return 0
     fi
 
-    log "Extracting Test CA and appending to OpenSearch certs configmap..."
+    # Ensure chart file is patched (idempotent)
+    patch_ca_into_chart
 
-    # Extract Test CA
-    kubectl get secret azul-opensearch-ca-cert -n azul-infra \
-        -o "jsonpath={.data.tls\.crt}" | base64 -d > /tmp/test-ca.pem
+    # Helm upgrade to apply the patched bundle to the configmap
+    log "Running helm upgrade azul-infra to bake Test CA into configmap..."
+    helm upgrade azul-infra "$INFRA_CHART" -n azul-infra -f "$INFRA_VALUES" --timeout 5m
+    log "azul-infra upgraded with Test CA in bundle"
 
-    # Get current CA bundle
-    kubectl get configmap azul-opensearch-certs -n azul-infra \
-        -o "jsonpath={.data.ca-certificates}" > /tmp/os-ca-bundle.pem
-
-    # Append
-    echo "" >> /tmp/os-ca-bundle.pem
-    echo "# Homelab Test CA (signs Keycloak TLS cert)" >> /tmp/os-ca-bundle.pem
-    cat /tmp/test-ca.pem >> /tmp/os-ca-bundle.pem
-
-    # Update configmap (use server-side apply with helm field manager to avoid
-    # field ownership conflicts on future helm upgrade azul-infra)
-    kubectl create configmap azul-opensearch-certs -n azul-infra \
-        --from-file=ca-certificates=/tmp/os-ca-bundle.pem \
-        --dry-run=client -o yaml | kubectl apply --server-side --field-manager=helm --force-conflicts -f -
-
-    # Restart OpenSearch — pod delete changes node ID, so we must re-run
-    # unsafe-bootstrap for single-node clusters (Issue #9 / #27)
+    # OpenSearch needs restart to pick up the new configmap.
+    # Single-node requires unsafe-bootstrap after every restart (node ID changes).
     log "Restarting OpenSearch to pick up updated CA bundle..."
-    log "Running unsafe-bootstrap (required: pod restart changes node ID)..."
     run_opensearch_bootstrap
     kubectl wait --for=condition=Ready pod/azul-opensearch-nodes-0 -n azul-infra --timeout=180s 2>/dev/null || true
-
-    # Always extract CA for app namespace use (regenerated on each fresh deploy)
-    kubectl get secret azul-opensearch-ca-cert -n azul-infra \
-        -o jsonpath='{.data.ca\.crt}' | base64 -d > "$OPENSEARCH_CA"
-    log "Saved OpenSearch CA to $OPENSEARCH_CA"
-
-    rm -f /tmp/test-ca.pem /tmp/os-ca-bundle.pem
 }
 
 verify_infra() {
@@ -576,10 +537,8 @@ print(json.dumps(s))
         log "Running helm upgrade azul-infra to apply writer hash..."
         helm upgrade azul-infra "$INFRA_CHART" -n azul-infra -f "$INFRA_VALUES" --timeout 5m
         log "azul-infra upgraded with new writer hash"
-
-        # Re-append Test CA (helm upgrade regenerates the configmap)
-        log "Re-appending Test CA after infra upgrade..."
-        append_test_ca_to_opensearch
+        # Test CA is baked into the chart's ca-certificates file,
+        # so helm upgrade preserves it automatically.
     else
         log "Secret metastore-creds already exists"
     fi
@@ -594,72 +553,11 @@ print(json.dumps(s))
         log "Secret s3-backup-keys already exists"
     fi
 
-    # CA cert configmap
-    if ! kubectl get configmap azul-ca-cert -n azul >/dev/null 2>&1; then
-        if [ -f "$OPENSEARCH_CA" ]; then
-            kubectl create configmap azul-ca-cert -n azul \
-                --from-file=ca.crt="$OPENSEARCH_CA"
-            log "Created configmap: azul-ca-cert"
-        else
-            log "WARNING: OpenSearch CA cert not found at $OPENSEARCH_CA"
-            log "  Extract it with: kubectl get secret azul-opensearch-ca-cert -n azul-infra -o jsonpath='{.data.ca\\.crt}' | base64 -d > $OPENSEARCH_CA"
-        fi
-    else
-        log "Configmap azul-ca-cert already exists"
-    fi
+    # CA cert configmap (extracted directly from cluster secret)
+    create_ca_configmap
 
-    # Web TLS certificate (azul-web-tls) — nginx serves fake cert without this
-    if ! kubectl get secret azul-web-tls -n azul >/dev/null 2>&1; then
-        log "Creating web TLS certificate..."
-
-        # Copy CA secret to azul namespace (issuer is namespace-scoped)
-        if ! kubectl get secret azul-opensearch-ca-cert -n azul >/dev/null 2>&1; then
-            kubectl get secret azul-opensearch-ca-cert -n azul-infra -o json \
-                | python3 -c "
-import sys, json
-s = json.load(sys.stdin)
-s['metadata'] = {'name': 'azul-opensearch-ca-cert', 'namespace': 'azul'}
-print(json.dumps(s))
-" | kubectl apply -f -
-        fi
-
-        # Create Issuer
-        if ! kubectl get issuer azul-ca-issuer -n azul >/dev/null 2>&1; then
-            cat <<'EOISSUER' | kubectl apply -f -
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: azul-ca-issuer
-  namespace: azul
-spec:
-  ca:
-    secretName: azul-opensearch-ca-cert
-EOISSUER
-        fi
-
-        # Create Certificate
-        cat <<'EOCERT' | kubectl apply -f -
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: azul-web-tls
-  namespace: azul
-spec:
-  secretName: azul-web-tls
-  issuerRef:
-    name: azul-ca-issuer
-    kind: Issuer
-  dnsNames:
-    - azul.kp.local
-  duration: 8760h
-  renewBefore: 720h
-EOCERT
-        sleep 5
-        kubectl wait --for=condition=Ready certificate/azul-web-tls -n azul --timeout=30s 2>/dev/null || true
-        log "Created web TLS certificate: azul-web-tls"
-    else
-        log "Secret azul-web-tls already exists"
-    fi
+    # Web TLS certificate (azul-web-tls)
+    create_azul_web_cert
 
     # --- 2.2 Install azul chart (core only, no plugins) ---
     log ""

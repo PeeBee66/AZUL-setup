@@ -36,7 +36,6 @@ DISCORD_WEBHOOK="https://discord.com/api/webhooks/1469836076154884215/SRt_iwtFSJ
 # External MinIO credentials (must match docker-compose-backup.yaml)
 BACKUP_S3_ACCESS="azul-backup"
 BACKUP_S3_SECRET="azul-backup-secret"
-OPENSEARCH_CA="${AZUL_DIR}/opensearch-ca.crt"
 
 # --- Helpers ---
 
@@ -130,27 +129,6 @@ set_recovery_mode() {
     log "Set recovery.mode to '$mode' in $VALUES_FILE"
 }
 
-reapply_test_ca() {
-    # helm upgrade resets the opensearch certs configmap, stripping the appended Test CA.
-    if [ ! -f "$OPENSEARCH_CA" ]; then return; fi
-    local ca_bundle
-    ca_bundle=$(kubectl get configmap azul-opensearch-certs -n azul-infra \
-        -o jsonpath='{.data.ca-certificates}' 2>/dev/null)
-    if echo "$ca_bundle" | grep -q "Test CA"; then return; fi
-    log "Re-applying Test CA to opensearch certs configmap..."
-    local tmpfile="/tmp/os-ca-bundle-$$.pem"
-    echo "$ca_bundle" > "$tmpfile"
-    echo "" >> "$tmpfile"
-    echo "# Test CA for Keycloak (self-signed)" >> "$tmpfile"
-    cat "$OPENSEARCH_CA" >> "$tmpfile"
-    kubectl create configmap azul-opensearch-certs -n azul-infra \
-        --from-file=ca-certificates="$tmpfile" \
-        --dry-run=client -o yaml | \
-        kubectl apply --server-side --field-manager=helm --force-conflicts -f - >/dev/null 2>&1
-    rm -f "$tmpfile"
-    log "Test CA re-applied"
-}
-
 # Get current recovery mode from values
 get_recovery_mode() {
     sed -n 's/^  mode: "\(.*\)"/\1/p' "$VALUES_FILE" | head -1
@@ -187,7 +165,7 @@ cmd_start() {
         send_discord "Backup Start" "failed" "Helm upgrade failed"
         exit 1
     fi
-    reapply_test_ca
+    # Test CA is baked into the chart's ca-certificates file — no re-apply needed.
 
     # 5. Wait for backup pod to be ready
     log "Waiting for backup pod to start..."
@@ -259,7 +237,6 @@ cmd_stop() {
         send_discord "Backup Stop" "failed" "Helm upgrade failed"
         exit 1
     fi
-    reapply_test_ca
 
     # Wait for backup pod to terminate
     log "Waiting for backup pod to terminate..."

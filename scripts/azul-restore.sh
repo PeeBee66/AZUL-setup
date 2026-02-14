@@ -32,7 +32,6 @@ DISCORD_WEBHOOK="https://discord.com/api/webhooks/1469836076154884215/SRt_iwtFSJ
 
 BACKUP_S3_ACCESS="azul-backup"
 BACKUP_S3_SECRET="azul-backup-secret"
-OPENSEARCH_CA="${AZUL_DIR}/opensearch-ca.crt"
 
 # --- Helpers ---
 
@@ -86,33 +85,6 @@ set_recovery_mode() {
     local mode="$1"
     sed -i "s/^  mode: .*/  mode: \"${mode}\"/" "$VALUES_FILE"
     log "Set recovery.mode to '$mode' in $VALUES_FILE"
-}
-
-reapply_test_ca() {
-    # helm upgrade resets the opensearch certs configmap, stripping the appended Test CA.
-    # Without it, OpenSearch can't validate Keycloak TLS → OIDC auth fails → API 500.
-    if [ ! -f "$OPENSEARCH_CA" ]; then
-        log "WARNING: $OPENSEARCH_CA not found, skipping Test CA re-application"
-        return
-    fi
-    local ca_bundle
-    ca_bundle=$(kubectl get configmap azul-opensearch-certs -n azul-infra \
-        -o jsonpath='{.data.ca-certificates}' 2>/dev/null)
-    if echo "$ca_bundle" | grep -q "Test CA"; then
-        return  # Already present
-    fi
-    log "Re-applying Test CA to opensearch certs configmap..."
-    local tmpfile="/tmp/os-ca-bundle-$$.pem"
-    echo "$ca_bundle" > "$tmpfile"
-    echo "" >> "$tmpfile"
-    echo "# Test CA for Keycloak (self-signed)" >> "$tmpfile"
-    cat "$OPENSEARCH_CA" >> "$tmpfile"
-    kubectl create configmap azul-opensearch-certs -n azul-infra \
-        --from-file=ca-certificates="$tmpfile" \
-        --dry-run=client -o yaml | \
-        kubectl apply --server-side --field-manager=helm --force-conflicts -f - >/dev/null 2>&1
-    rm -f "$tmpfile"
-    log "Test CA re-applied to opensearch certs configmap"
 }
 
 # --- Commands ---
@@ -236,7 +208,7 @@ cmd_restore() {
         set_recovery_mode "off"
         die "Helm upgrade failed during restore"
     fi
-    reapply_test_ca
+    # Test CA is baked into the chart's ca-certificates file — no re-apply needed.
 
     # Wait for restore Job to appear
     log "Waiting for restore Job to start..."
@@ -304,7 +276,6 @@ cmd_restore() {
     log "Setting recovery mode back to 'off'..."
     set_recovery_mode "off"
     helm upgrade "$RELEASE" "$CHART_DIR" -n "$NAMESPACE" -f "$VALUES_FILE" --timeout 5m 2>/dev/null || true
-    reapply_test_ca
 
     log ""
     log "=== RESTORE COMPLETE ==="
