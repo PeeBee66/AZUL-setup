@@ -52,12 +52,14 @@ AZUL is a malware repository, analytical engine, and clustering suite by the Aus
 
 ## Complete File Inventory
 
-All files needed to deploy and manage AZUL. The upstream chart repo (`azul-app/`) must be cloned separately.
+All files needed to deploy and manage AZUL. Everything is included in this repo — no internet access required.
 
-### Upstream Chart Repository (clone separately)
+### Upstream Chart Repository (included, pre-patched)
+
+The upstream `azul-app/` repo is included at the `azul-9.0.0` tag with all 3 template patches already applied. No need to clone separately.
 
 ```
-azul-app/                              # git clone + checkout azul-9.0.0
+azul-app/                              # azul-9.0.0 tag, pre-patched
 ├── azul/                              # Main app Helm chart (Stage 2+3)
 │   ├── Chart.yaml
 │   ├── values.yaml
@@ -73,6 +75,16 @@ azul-app/                              # git clone + checkout azul-9.0.0
 │       └── opensearch.yaml            # PATCHED: additionalVolumes + additionalConfig support
 └── cosign.pub
 ```
+
+### Operator Helm Charts (included as .tgz)
+
+```
+charts/
+├── strimzi-kafka-operator-helm-3-chart-0.50.0.tgz    # Strimzi Kafka Operator
+└── opensearch-operator-2.8.0.tgz                     # OpenSearch K8s Operator
+```
+
+The deploy script installs these directly from the local `.tgz` files — no `helm repo add` needed.
 
 ### Custom Configuration Files
 
@@ -101,18 +113,6 @@ azul-app/                              # git clone + checkout azul-9.0.0
 |------|-----------|---------|
 | `azul-app/infra/ca-certificates` (patched) | `setup-certs.sh` | Test CA appended to chart's Mozilla CA bundle |
 
-### Operator Helm Charts (from remote repos)
-
-```bash
-# Add repos before first install:
-helm repo add strimzi https://strimzi.io/charts/
-helm repo add opensearch-operator https://opensearch-project.github.io/opensearch-k8s-operator/
-
-# For offline: download charts
-helm pull strimzi/strimzi-kafka-operator --version 0.50.0
-helm pull opensearch-operator/opensearch-operator --version 2.8.0
-```
-
 ---
 
 ## Prerequisites
@@ -125,10 +125,9 @@ Before starting the install, ensure:
 - [x] `kubectl`, `helm`, `python3`, `curl`, `openssl` in PATH
 - [x] `python3 -c "import bcrypt"` works (`pip3 install bcrypt`)
 - [x] Docker or Podman available on the host (for external MinIO backup target)
-- [x] Helm repos added: `strimzi`, `opensearch-operator`
 - [x] Talos PodSecurity exemptions applied for: `kafka`, `opensearch-operator`, `azul-infra`, `azul`
 - [x] Pi-hole DNS records created (see DNS Records section)
-- [x] Chart repo cloned and patched (see Upstream Chart Patches section)
+- [x] This repo cloned to `/data/AZUL/` (includes azul-app charts, operator .tgz files, all scripts)
 - [x] `.azul-credentials` file created with generated passwords (mode 600)
 
 ### Talos PodSecurity Exemptions
@@ -169,16 +168,11 @@ EOF
 chmod 600 /data/AZUL/.azul-credentials
 ```
 
-### Chart Version Selection
+### Chart Version
 
-The `main` branch uses chart version `10.0.0-unstable` with image tags not publicly available on Docker Hub. The stable `9.0.0` tag has all images available.
+The included `azul-app/` directory is at the stable `azul-9.0.0` tag with all 3 template patches pre-applied. No checkout or patching needed.
 
-```bash
-cd /data/AZUL/azul-app
-git checkout azul-9.0.0
-```
-
-**Note**: The infra chart uses standard upstream images (OpenSearch, Kafka, MinIO, Keycloak) that are publicly available from `main`. Only the AZUL-specific app images (`asdazul/*`) require the stable `9.0.0` tag.
+**Note**: The upstream `main` branch uses `10.0.0-unstable` with image tags not publicly available on Docker Hub. The stable `9.0.0` tag is what we use — all `asdazul/*` images are available on Docker Hub at this tag.
 
 ---
 
@@ -324,23 +318,23 @@ This section provides every command needed for a manual install. The deploy scri
 #### 1.1 Install Strimzi Kafka Operator
 
 ```bash
-helm install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
+helm install strimzi-kafka-operator /data/AZUL/charts/strimzi-kafka-operator-helm-3-chart-0.50.0.tgz \
   --namespace kafka --create-namespace \
   --set watchAnyNamespace=true \
-  --version 0.50.0 --timeout 3m
+  --timeout 3m
 
 # Wait for operator pod
 kubectl wait --for=condition=ready pod -l name=strimzi-cluster-operator -n kafka --timeout=120s
 ```
 
-**Note**: Use `watchAnyNamespace=true`, NOT `watchNamespaces="{*}"` (YAML parse error).
+**Note**: Use `watchAnyNamespace=true`, NOT `watchNamespaces="{*}"` (YAML parse error). The chart is installed from the local `.tgz` file — no `helm repo add` needed.
 
 #### 1.2 Install OpenSearch Operator
 
 ```bash
-helm install opensearch-operator opensearch-operator/opensearch-operator \
+helm install opensearch-operator /data/AZUL/charts/opensearch-operator-2.8.0.tgz \
   --namespace opensearch-operator --create-namespace \
-  --version 2.8.0 --timeout 3m
+  --timeout 3m
 
 # Wait for operator pod
 kubectl wait --for=condition=ready pod -l control-plane=controller-manager -n opensearch-operator --timeout=120s
@@ -1270,15 +1264,11 @@ All credentials saved to `/data/AZUL/.azul-credentials` (mode 600).
 
 ### Pre-staging (with internet)
 
-1. [ ] Clone repo: `git clone https://github.com/AustralianCyberSecurityCentre/azul-app.git`
-2. [ ] Checkout stable tag: `cd azul-app && git checkout azul-9.0.0`
-3. [ ] Apply template patches (see [Upstream Chart Patches](#upstream-chart-patches))
-4. [ ] Pull Helm charts: `helm pull strimzi/strimzi-kafka-operator --version 0.50.0` and `helm pull opensearch-operator/opensearch-operator --version 2.8.0`
-5. [ ] Pull all container images (see [Container Images Required](#container-images-required) and image pull script)
-6. [ ] Copy custom files to offline media:
-   - `azul-infra-values.yaml`, `azul-values.yaml`, `azul-values-core.yaml`
-   - `setup-keycloak.sh`, `.azul-credentials`, `docker-compose-backup.yaml`
-   - `scripts/` (azul-deploy.sh, azul-teardown.sh, azul-backup.sh, azul-restore.sh, setup-certs.sh)
+1. [ ] Clone this repo: `git clone https://github.com/PeeBee66/AZUL-setup.git /data/AZUL`
+   - Includes: azul-app charts (pre-patched), operator .tgz files, all scripts, values files
+2. [ ] Create `.azul-credentials` file with generated passwords (see [Prerequisites](#prerequisites))
+3. [ ] Pull all container images (see [Container Images Required](#container-images-required) and image pull script)
+4. [ ] Transfer `/data/AZUL/` directory and container images to offline media
 
 ### Installation (offline)
 

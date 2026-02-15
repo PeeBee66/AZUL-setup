@@ -1,0 +1,20 @@
+{{- if (index .Values.plugins "report-feeds").feedConfig -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: report-feeds
+data:
+  {{- with (index .Values.plugins "report-feeds").feedConfig }}
+  REPORT_FEED_FEEDS_CONFIG: |-
+    {{- mustToJson . | nindent 4 }}
+  {{- end }}
+{{- else if (index .Values.plugins "report-feeds").demoConfig}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: report-feeds
+data:
+  REPORT_FEED_FEEDS_CONFIG: |-
+    [{"distribution":"public","feed_url":"https://www.microsoft.com/en-us/security/blog/topic/threat-intelligence/feed/","module":"reportcollector.feeds.rss.RSSFeed","publisher":"Microsoft","site":"https://www.microsoft.com/security/","source":"reporting"}]
+
+{{- end }}

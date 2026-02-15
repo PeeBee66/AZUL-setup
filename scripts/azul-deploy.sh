@@ -124,10 +124,9 @@ stage_infra() {
     if helm status strimzi-kafka-operator -n kafka >/dev/null 2>&1; then
         log "Strimzi already installed, skipping"
     else
-        helm install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
+        helm install strimzi-kafka-operator "${AZUL_DIR}/charts/strimzi-kafka-operator-helm-3-chart-0.50.0.tgz" \
             --namespace kafka --create-namespace \
             --set watchAnyNamespace=true \
-            --version 0.50.0 \
             --timeout 3m
         log "Strimzi operator installed"
     fi
@@ -141,9 +140,8 @@ stage_infra() {
     if helm status opensearch-operator -n opensearch-operator >/dev/null 2>&1; then
         log "OpenSearch operator already installed, skipping"
     else
-        helm install opensearch-operator opensearch-operator/opensearch-operator \
+        helm install opensearch-operator "${AZUL_DIR}/charts/opensearch-operator-2.8.0.tgz" \
             --namespace opensearch-operator --create-namespace \
-            --version 2.8.0 \
             --timeout 3m
         log "OpenSearch operator installed"
     fi
