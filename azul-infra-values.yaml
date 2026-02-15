@@ -166,19 +166,19 @@ opensearch:
       type: "internalusers"
       config_version: 2
     admin:
-      hash: "$2a$12$u7h.fuRJdjoxYgoRlSKJbuONpXKhaD1oCQKowFJGgdLqY1UXmBUfW"
+      hash: "$2b$12$EsPHavjlNMtkbtklWSZTu.j4lWDGHgf0tV8RUohNQcBM5GyXDOX8i"
       reserved: true
       backend_roles:
         - "admin"
       description: "admin user"
     kibanaserver:
-      hash: "$2a$12$vtYtqDCbUXuXAnMPBstDjuTgZRvPsr2k4Z4N5FeYQX7qTfzRb8r/a"
+      hash: "$2b$12$wEXnNiUkVdhFCd4KPD5p.O1rmURCjKjsVBHGRyMotFTt7ZedpoEJ2"
       reserved: true
     monitor:
-      hash: "$2a$12$u7h.fuRJdjoxYgoRlSKJbuONpXKhaD1oCQKowFJGgdLqY1UXmBUfW"
+      hash: "$2b$12$EsPHavjlNMtkbtklWSZTu.j4lWDGHgf0tV8RUohNQcBM5GyXDOX8i"
       description: "Exporter monitoring"
     azul_writer:
-      hash: "$2b$12$1eNiadFjer/XMAYpcIU0se5GvfTUTu1fktgf1VsjR2XZqJJenBOve"
+      hash: "$2b$12$tbZ1oXJxWwkYucWmeWdWWuqxKinCt2bGLrId8DclcP5PMd8eyHkJ."
       backend_roles:
         - "azul_write"
       description: "Service account for metastore writer"
