@@ -101,6 +101,7 @@ The deploy script installs these directly from the local `.tgz` files — no `he
 
 | File | Purpose |
 |------|---------|
+| `scripts/Infra_install.sh` | Standalone infra install (10 steps, `--step N` resume, `--check` mode, full image/registry reference) |
 | `scripts/azul-deploy.sh` | 3-stage deploy with health checks (infra → app → plugins) |
 | `scripts/azul-teardown.sh` | Complete Azul removal (helm releases, PVCs, namespaces, operators, CRDs, CoreDNS) |
 | `scripts/azul-backup.sh` | Start/stop/status continuous backup to external MinIO |
@@ -140,14 +141,15 @@ talosctl --talosconfig /home/kp-admin/KUBS/talosconfig -n 192.168.66.201 patch m
 
 ### Credentials File
 
-Create `/data/AZUL/.azul-credentials` (mode 600) with pre-generated passwords:
+Generate `/data/AZUL/.azul-credentials` (mode 600) with **static** passwords. Use `Infra_install.sh --creds` to generate automatically, or create manually:
 
 ```bash
-# Generate credentials
-cat > /data/AZUL/.azul-credentials << 'EOF'
-# AZUL Infrastructure Credentials - SENSITIVE - DO NOT COMMIT
+cat > /data/AZUL/.azul-credentials <<EOF
+# AZUL Infrastructure Credentials — SENSITIVE — DO NOT COMMIT
+# Generated: $(date '+%Y-%m-%d %H:%M:%S')
+# These are STATIC values. Do not change after secrets are created in cluster.
 
-## MinIO (Main)
+## MinIO (Main S3 storage)
 S3_ACCESS_KEY=$(openssl rand -hex 16)
 S3_SECRET_KEY=$(openssl rand -hex 32)
 
@@ -155,7 +157,7 @@ S3_SECRET_KEY=$(openssl rand -hex 32)
 OS_ADMIN_USER=admin
 OS_ADMIN_PASS=$(openssl rand -base64 24)
 
-## OpenSearch Dashboard
+## OpenSearch Dashboard (kibanaserver)
 OS_DASH_USER=kibanaserver
 OS_DASH_PASS=$(openssl rand -base64 24)
 
@@ -167,6 +169,8 @@ EOF
 
 chmod 600 /data/AZUL/.azul-credentials
 ```
+
+**Important**: Use unquoted `EOF` (not `'EOF'`) so `$(openssl ...)` expands at creation time, producing static values. Once created, the file contains fixed passwords — safe to re-source without generating different values each time.
 
 ### Chart Version
 
@@ -1018,27 +1022,58 @@ helm list -A | grep -E "azul|strimzi|opensearch"            # Should be empty
 
 Validated end-to-end on 2026-02-12.
 
+### Script Overview — What Each Script Does and When to Use It
+
+| Order | Script | What It Does | When to Use |
+|-------|--------|--------------|-------------|
+| 1 | `Infra_install.sh` | Standalone infra installer: generates credentials, installs operators (Strimzi + OpenSearch), creates namespace/secrets, deploys azul-infra Helm chart, patches CA certs, bootstraps OpenSearch, configures CoreDNS, creates Keycloak TLS cert, sets up Keycloak realm/users. 10 steps with `--step N` resume. | **First-time install** or when you want explicit control over the infra layer. Use `--check` to see current state, `--step 7` to resume from a specific step. |
+| 2 | `azul-deploy.sh` | Full 3-stage automated deploy (infra → app → plugins) with health checks and Discord notifications. Infra stage does the same as `Infra_install.sh` but also includes Stage 2 (core app) and Stage 3 (plugins). | **Full deploy** (all 3 stages) or individual stages (`infra`, `app`, `plugins`). Preferred for repeat deploys where you want everything automated. |
+| 3 | `azul-backup.sh` | Starts/stops/checks the built-in Azul backup mechanism. Starts an external MinIO on the host (docker-compose), creates the `s3-backup-keys` secret, toggles `recovery.mode` to `backup` via helm upgrade. Backup pod runs continuously, replicating Kafka events + binary streams to external S3. | **Before teardown** or on a regular schedule. Run `start` to begin, `status` to check, `stop` when done. |
+| 4 | `azul-teardown.sh` | Complete removal: uninstalls Helm releases (azul, azul-infra), deletes all PVCs, deletes namespaces (azul, azul-infra), uninstalls operators (Strimzi, OpenSearch), deletes CRDs, cleans CoreDNS. | **Before a fresh redeploy** or decommissioning. Use `--force` to skip confirmation prompt. |
+| 5 | `azul-restore.sh` | Restores data from external MinIO backup. Sets `recovery.mode` to `restore`, runs helm upgrade to create a restore Job that replays all events + streams. OpenSearch indices rebuild automatically. | **After a fresh deploy** (Stages 1+2 must be running). Use `--check` to verify backup data first. |
+| — | `setup-certs.sh` | Certificate management helper. Patches CA into chart bundle, creates Keycloak/Azul TLS certs. Sourced by other scripts or run standalone. | **Called automatically** by `Infra_install.sh` and `azul-deploy.sh`. Run standalone to fix cert issues. |
+| — | `setup-keycloak.sh` | Creates Keycloak realm, roles, groups, client scopes, clients, and test users via Admin API. | **Called automatically** by `Infra_install.sh` and `azul-deploy.sh`. Run standalone to reconfigure Keycloak. |
+
+### Recommended Script Execution Order
+
 ```bash
-# 1. Backup everything
-/data/AZUL/scripts/azul-backup.sh start
-# ... wait for backup data to accumulate ...
-/data/AZUL/scripts/azul-backup.sh stop
+# === FRESH INSTALL ===
+# Option A: Use Infra_install.sh for infra, then azul-deploy.sh for app+plugins
+/data/AZUL/scripts/Infra_install.sh             # Infra layer (10 steps)
+/data/AZUL/scripts/azul-deploy.sh app            # Stage 2: core app (13 pods)
+/data/AZUL/scripts/azul-deploy.sh plugins        # Stage 3: plugins (50 pods)
 
-# 2. Teardown (wipe all 4 namespaces + operators + CRDs)
-/data/AZUL/scripts/azul-teardown.sh --force
+# Option B: Use azul-deploy.sh for everything
+/data/AZUL/scripts/azul-deploy.sh all            # All 3 stages in one run
 
-# 3. Redeploy (3 stages: infra → app → plugins)
-/data/AZUL/scripts/azul-deploy.sh all
+# === FULL LIFECYCLE (backup → teardown → redeploy → restore) ===
+/data/AZUL/scripts/azul-backup.sh start          # 1. Start backup
+# ... wait for data to accumulate ...
+/data/AZUL/scripts/azul-backup.sh stop           # 2. Stop backup
 
-# 4. Restore data from backup
-/data/AZUL/scripts/azul-restore.sh
+/data/AZUL/scripts/azul-teardown.sh --force      # 3. Wipe everything
+
+/data/AZUL/scripts/azul-deploy.sh all            # 4. Redeploy (3 stages)
+# OR: /data/AZUL/scripts/Infra_install.sh + azul-deploy.sh app + azul-deploy.sh plugins
+
+/data/AZUL/scripts/azul-restore.sh               # 5. Restore from backup
 ```
 
-Individual stages:
-```bash
-/data/AZUL/scripts/azul-deploy.sh infra     # Stage 1: operators + Kafka/OpenSearch/MinIO/Keycloak
-/data/AZUL/scripts/azul-deploy.sh app       # Stage 2: core app (13 pods, no plugins)
-/data/AZUL/scripts/azul-deploy.sh plugins   # Stage 3: all plugins (50 pods)
+### Infra_install.sh Step Reference
+
+```
+Step  What                           Key Files/Resources Touched
+────  ──────────────────────────     ──────────────────────────────────────
+  1   Generate credentials           .azul-credentials (static passwords)
+  2   Install Strimzi operator       charts/strimzi...tgz → kafka namespace
+  3   Install OpenSearch operator    charts/opensearch...tgz → opensearch-operator namespace
+  4   Create namespace + secrets     azul-infra namespace, 4 K8s secrets
+  5   Helm install azul-infra        azul-app/infra/ + azul-infra-values.yaml
+  6   Patch CA + wait for pods       setup-certs.sh → ca-certificates, wait for Kafka/MinIO/PG/KC
+  7   OpenSearch unsafe-bootstrap    Scale down → bootstrap Job → scale up
+  8   CoreDNS + Keycloak TLS cert    CoreDNS configmap, cert-manager Certificate
+  9   Bake CA into OpenSearch        helm upgrade + unsafe-bootstrap restart
+ 10   Keycloak setup + verify        setup-keycloak.sh, health checks
 ```
 
 ### Lifecycle Test Results (2026-02-12)
@@ -1295,6 +1330,7 @@ All scripts work on **Ubuntu 22.04+** and **RHEL 9+**. They use bash, kubectl, h
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
+| `Infra_install.sh` | Standalone infra install with image/registry reference | `./Infra_install.sh [--step N] [--check] [--creds]` |
 | `azul-deploy.sh` | 3-stage deploy with health checks | `./azul-deploy.sh {all\|infra\|app\|plugins}` |
 | `azul-teardown.sh` | Complete Azul removal | `./azul-teardown.sh [--force]` |
 | `azul-backup.sh` | Continuous backup to external MinIO | `./azul-backup.sh [start\|stop\|status]` |
