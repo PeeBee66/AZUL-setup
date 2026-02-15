@@ -28,7 +28,7 @@ set -euo pipefail
 
 export KUBECONFIG="/home/kp-admin/KUBS/kubeconfig"
 
-DISCORD_WEBHOOK="https://discord.com/api/webhooks/1469836076154884215/SRt_iwtFSJVveLipv2DZ0i6h5tCLhejiD2mlmLUCllPtSgl0CfnRQGxRvy1Lk5lPJDLJ"
+DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"  # Set via environment or .azul-credentials
 
 FORCE=false
 [ "${1:-}" = "--force" ] && FORCE=true

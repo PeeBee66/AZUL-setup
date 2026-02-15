@@ -106,7 +106,7 @@ OPENSEARCH_CHART="${AZUL_DIR}/charts/opensearch-operator-2.8.0.tgz"
 # OpenSearch image used for unsafe-bootstrap Job (must match opensearch.general.version)
 OPENSEARCH_IMAGE="docker.io/opensearchproject/opensearch:3.2.0"
 
-DISCORD_WEBHOOK="https://discord.com/api/webhooks/1469836076154884215/SRt_iwtFSJVveLipv2DZ0i6h5tCLhejiD2mlmLUCllPtSgl0CfnRQGxRvy1Lk5lPJDLJ"
+DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"  # Set via environment or .azul-credentials
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }

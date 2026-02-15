@@ -39,7 +39,7 @@ KEYCLOAK_SCRIPT="${AZUL_DIR}/setup-keycloak.sh"
 # Source certificate functions (patch_ca_into_chart, create_keycloak_cert, etc.)
 source "${AZUL_DIR}/scripts/setup-certs.sh"
 
-DISCORD_WEBHOOK="https://discord.com/api/webhooks/1469836076154884215/SRt_iwtFSJVveLipv2DZ0i6h5tCLhejiD2mlmLUCllPtSgl0CfnRQGxRvy1Lk5lPJDLJ"
+DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"  # Set via environment or .azul-credentials
 
 # --- Helpers ---
 
