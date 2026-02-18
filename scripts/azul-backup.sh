@@ -22,20 +22,19 @@
 # Compatible with: Ubuntu 22.04+, RHEL 9+
 set -euo pipefail
 
-export KUBECONFIG="/home/kp-admin/KUBS/kubeconfig"
+# Source central config
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../azul.conf"
 
-AZUL_DIR="/data/AZUL"
 VALUES_FILE="${AZUL_DIR}/azul-values.yaml"
 COMPOSE_FILE="${AZUL_DIR}/docker-compose-backup.yaml"
 CHART_DIR="${AZUL_DIR}/azul-app/azul"
 NAMESPACE="azul"
 RELEASE="azul"
 
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"  # Set via environment or .azul-credentials
-
-# External MinIO credentials (must match docker-compose-backup.yaml)
-BACKUP_S3_ACCESS="azul-backup"
-BACKUP_S3_SECRET="azul-backup-secret"
+# External MinIO credentials (from azul.conf)
+BACKUP_S3_ACCESS="${BACKUP_S3_USER}"
+BACKUP_S3_SECRET="${BACKUP_S3_PASSWORD}"
 
 # --- Helpers ---
 
@@ -99,8 +98,8 @@ start_minio() {
     done
 
     # Fallback: check if port is responding
-    if curl -sf -o /dev/null "http://localhost:9100/minio/health/live" 2>/dev/null; then
-        log "External MinIO is responding on port 9100"
+    if curl -sf -o /dev/null "http://localhost:${BACKUP_MINIO_PORT}/minio/health/live" 2>/dev/null; then
+        log "External MinIO is responding on port ${BACKUP_MINIO_PORT}"
         return 0
     fi
 
@@ -206,14 +205,14 @@ with open('$VALUES_FILE') as f:
     log "=== Azul Backup STARTED ==="
     log "Mode: continuous (backup pod runs until stopped)"
     log "Label: $label"
-    log "Target: External MinIO at 192.168.66.41:9100"
+    log "Target: External MinIO at ${FILESERVER_IP}:${BACKUP_MINIO_PORT}"
     log "Buckets: azul-backup-${label}-streams, azul-backup-${label}-events"
-    log "Console: http://192.168.66.41:9101 (azul-backup/azul-backup-secret)"
+    log "Console: http://${FILESERVER_IP}:${BACKUP_MINIO_CONSOLE_PORT} (${BACKUP_S3_USER}/${BACKUP_S3_PASSWORD})"
     log ""
     log "To stop: $0 stop"
     log "To check: $0 status"
 
-    send_discord "Backup Start" "success" "Backup pod running, label=$label, target=192.168.66.41:9100"
+    send_discord "Backup Start" "success" "Backup pod running, label=$label, target=${FILESERVER_IP}:${BACKUP_MINIO_PORT}"
 }
 
 cmd_stop() {
@@ -272,14 +271,14 @@ cmd_status() {
     # External MinIO
     log ""
     log "External MinIO:"
-    if curl -sf -o /dev/null "http://localhost:9100/minio/health/live" 2>/dev/null; then
-        log "  Status: HEALTHY (port 9100)"
-        log "  Console: http://192.168.66.41:9101"
-        log "  Data dir: /data/backups/azul-minio/"
+    if curl -sf -o /dev/null "http://localhost:${BACKUP_MINIO_PORT}/minio/health/live" 2>/dev/null; then
+        log "  Status: HEALTHY (port ${BACKUP_MINIO_PORT})"
+        log "  Console: http://${FILESERVER_IP}:${BACKUP_MINIO_CONSOLE_PORT}"
+        log "  Data dir: ${BACKUP_DIR}/"
 
         # List buckets if mc is available (optional)
         if command -v mc >/dev/null 2>&1; then
-            mc alias set azul-bk http://localhost:9100 "$BACKUP_S3_ACCESS" "$BACKUP_S3_SECRET" >/dev/null 2>&1 || true
+            mc alias set azul-bk http://localhost:${BACKUP_MINIO_PORT} "$BACKUP_S3_ACCESS" "$BACKUP_S3_SECRET" >/dev/null 2>&1 || true
             log "  Buckets:"
             mc ls azul-bk/ 2>/dev/null | while read -r line; do log "    $line"; done
         else

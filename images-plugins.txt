@@ -1,0 +1,53 @@
+# AZUL Plugin Images
+# Used by: azul Helm chart (plugin deployments)
+# Stage: plugins
+
+# Plugin images (docker.io/asdazul/*)
+docker.io/asdazul/plugin-alphabets:9.0.0
+docker.io/asdazul/plugin-android-parser:9.0.0
+docker.io/asdazul/plugin-assemblyline:9.0.0
+docker.io/asdazul/plugin-build-time-strings:9.0.0
+docker.io/asdazul/plugin-cape:9.0.0
+docker.io/asdazul/plugin-certificates:9.0.0
+docker.io/asdazul/plugin-de4dot:9.0.0
+docker.io/asdazul/plugin-debloat:9.0.0
+docker.io/asdazul/plugin-dotnet-decompiler:9.0.0
+docker.io/asdazul/plugin-dotnet-deob:9.0.0
+docker.io/asdazul/plugin-email:9.0.0
+docker.io/asdazul/plugin-entropy:9.0.0
+docker.io/asdazul/plugin-entrypointcheck:9.0.0
+docker.io/asdazul/plugin-exiftool:9.0.0
+docker.io/asdazul/plugin-export-hashes:9.0.0
+docker.io/asdazul/plugin-floss:9.0.0
+docker.io/asdazul/plugin-ghidra:9.0.0
+docker.io/asdazul/plugin-goinfo:9.0.0
+docker.io/asdazul/plugin-image-convert:9.0.0
+docker.io/asdazul/plugin-index-coincidence:9.0.0
+docker.io/asdazul/plugin-js-deobf:9.0.0
+docker.io/asdazul/plugin-lief:9.0.0
+docker.io/asdazul/plugin-lookback:9.0.0
+docker.io/asdazul/plugin-maco:9.0.0
+docker.io/asdazul/plugin-malcarve:9.0.0
+docker.io/asdazul/plugin-mandiant-capa:9.0.0
+docker.io/asdazul/plugin-netinfo:9.0.0
+docker.io/asdazul/plugin-nsrl:9.0.0
+docker.io/asdazul/plugin-office:9.0.0
+docker.io/asdazul/plugin-pdftools:9.0.0
+docker.io/asdazul/plugin-portex:9.0.0
+docker.io/asdazul/plugin-python:9.0.0
+docker.io/asdazul/plugin-qrcode:9.0.0
+docker.io/asdazul/plugin-repeated-bytes:9.0.0
+docker.io/asdazul/plugin-retrohunt:9.0.0
+docker.io/asdazul/plugin-richid:9.0.0
+docker.io/asdazul/plugin-script-decoder:9.0.0
+docker.io/asdazul/plugin-shortcut:9.0.0
+docker.io/asdazul/plugin-suricata:9.0.0
+docker.io/asdazul/plugin-tika:9.0.0
+docker.io/asdazul/plugin-truncated:9.0.0
+docker.io/asdazul/plugin-unbox:9.0.0
+docker.io/asdazul/plugin-virustotal:9.0.0
+docker.io/asdazul/plugin-yara:9.0.0
+
+# External plugin dependencies
+docker.io/apache/tika:3.2.3.0-full
+registry.k8s.io/git-sync/git-sync:v4.5.0

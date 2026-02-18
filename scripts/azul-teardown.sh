@@ -26,9 +26,9 @@
 # Compatible with: Ubuntu 22.04+, RHEL 9+
 set -euo pipefail
 
-export KUBECONFIG="/home/kp-admin/KUBS/kubeconfig"
-
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"  # Set via environment or .azul-credentials
+# Source central config
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../azul.conf"
 
 FORCE=false
 [ "${1:-}" = "--force" ] && FORCE=true
@@ -243,7 +243,7 @@ log "=== Step 7/7: Clean CoreDNS hosts block ==="
 # Get current Corefile
 COREFILE=$(kubectl get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}' 2>/dev/null || true)
 
-if echo "$COREFILE" | grep -q "keycloak-azul.kp.local"; then
+if echo "$COREFILE" | grep -q "${KEYCLOAK_HOST}"; then
     log "Removing azul hosts block from CoreDNS..."
     # Remove the hosts block containing azul entries
     NEW_COREFILE=$(echo "$COREFILE" | python3 -c "

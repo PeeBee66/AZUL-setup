@@ -38,11 +38,21 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-export KUBECONFIG="${KUBECONFIG:-/home/kp-admin/KUBS/kubeconfig}"
+# Source central config
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../azul.conf"
+
+# Pre-flight: ensure python3 bcrypt module is available (RHEL 9 doesn't ship it)
+if ! python3 -c "import bcrypt" >/dev/null 2>&1; then
+    echo "[WARN] Python bcrypt module not found. Attempting pip install..."
+    python3 -m pip install --quiet bcrypt 2>/dev/null || \
+    python3 -m pip install --quiet --user bcrypt 2>/dev/null || \
+    { echo "[FATAL] Cannot install bcrypt. Run: dnf install python3-bcrypt (RHEL) or apt install python3-bcrypt (Ubuntu)"; exit 1; }
+fi
 
 # Must match opensearch.general.version in azul-infra-values.yaml
 OPENSEARCH_IMAGE="docker.io/opensearchproject/opensearch:3.2.0"
-CREDS_FILE="/data/AZUL/.azul-credentials"
+CREDS_FILE="${AZUL_DIR}/.azul-credentials"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 die() { log "FATAL: $*"; exit 1; }

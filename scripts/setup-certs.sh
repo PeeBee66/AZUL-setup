@@ -29,9 +29,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     set -euo pipefail
 fi
 
-export KUBECONFIG="${KUBECONFIG:-/home/kp-admin/KUBS/kubeconfig}"
-
-AZUL_DIR="${AZUL_DIR:-/data/AZUL}"
+# Source central config if not already loaded
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${AZUL_DIR:-}" ]; then
+    source "${SCRIPT_DIR}/../azul.conf"
+fi
 INFRA_CHART="${INFRA_CHART:-${AZUL_DIR}/azul-app/infra}"
 INFRA_VALUES="${INFRA_VALUES:-${AZUL_DIR}/azul-infra-values.yaml}"
 CA_BUNDLE_FILE="${INFRA_CHART}/ca-certificates"
@@ -120,7 +122,7 @@ spec:
     name: azul-opensearch-ca-issuer
     kind: Issuer
   dnsNames:
-    - keycloak-azul.kp.local
+    - ${KEYCLOAK_HOST}
   duration: 8760h
   renewBefore: 720h
 EOF
@@ -180,7 +182,7 @@ spec:
     name: azul-ca-issuer
     kind: Issuer
   dnsNames:
-    - azul.kp.local
+    - ${AZUL_HOST}
   duration: 8760h
   renewBefore: 720h
 EOCERT

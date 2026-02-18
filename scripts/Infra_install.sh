@@ -90,10 +90,11 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-export KUBECONFIG="${KUBECONFIG:-/home/kp-admin/KUBS/kubeconfig}"
+# Source central config
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../azul.conf"
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-AZUL_DIR="/data/AZUL"
 INFRA_CHART="${AZUL_DIR}/azul-app/infra"
 INFRA_VALUES="${AZUL_DIR}/azul-infra-values.yaml"
 CREDS_FILE="${AZUL_DIR}/.azul-credentials"
@@ -560,21 +561,21 @@ step8_coredns_and_keycloak_cert() {
     local COREFILE
     COREFILE=$(kubectl get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}' 2>/dev/null)
 
-    if echo "$COREFILE" | grep -q "keycloak-azul.kp.local"; then
+    if echo "$COREFILE" | grep -q "${KEYCLOAK_HOST}"; then
         log "CoreDNS already has azul hosts entries"
     else
         log "Adding azul hosts block to CoreDNS..."
-        local NEW_COREFILE
-        NEW_COREFILE=$(echo "$COREFILE" | python3 -c "
-import sys
-content = sys.stdin.read()
-hosts_block = '''    hosts {
-        192.168.66.201 keycloak-azul.kp.local
-        192.168.66.201 opensearch-azul.kp.local
-        192.168.66.201 azul.kp.local
+        local HOSTS_BLOCK="    hosts {
+        ${CLUSTER_IP} ${KEYCLOAK_HOST}
+        ${CLUSTER_IP} ${OPENSEARCH_HOST}
+        ${CLUSTER_IP} ${AZUL_HOST}
         fallthrough
-    }
-'''
+    }"
+        local NEW_COREFILE
+        NEW_COREFILE=$(echo "$COREFILE" | HOSTS_BLOCK="$HOSTS_BLOCK" python3 -c "
+import sys, os
+content = sys.stdin.read()
+hosts_block = os.environ['HOSTS_BLOCK']
 lines = content.split('\n')
 result = []
 inserted = False
@@ -703,7 +704,7 @@ step10_keycloak_and_verify() {
     log "Checking Keycloak azul realm..."
     local kc_code
     kc_code=$(curl -k -sf -o /dev/null -w '%{http_code}' \
-        -H "Host: keycloak-azul.kp.local" https://192.168.66.201/realms/azul 2>/dev/null || echo "000")
+        -H "Host: ${KEYCLOAK_HOST}" https://${CLUSTER_IP}/realms/azul 2>/dev/null || echo "000")
     if [ "$kc_code" = "200" ]; then
         log "  Keycloak azul realm: OK ($kc_code)"
     else

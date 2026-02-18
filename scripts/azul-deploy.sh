@@ -25,9 +25,10 @@
 # Compatible with: Ubuntu 22.04+, RHEL 9+
 set -euo pipefail
 
-export KUBECONFIG="/home/kp-admin/KUBS/kubeconfig"
+# Source central config (sets KUBECONFIG, CLUSTER_IP, DOMAIN, AZUL_DIR, etc.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../azul.conf"
 
-AZUL_DIR="/data/AZUL"
 INFRA_VALUES="${AZUL_DIR}/azul-infra-values.yaml"
 CORE_VALUES="${AZUL_DIR}/azul-values-core.yaml"
 FULL_VALUES="${AZUL_DIR}/azul-values.yaml"
@@ -39,7 +40,15 @@ KEYCLOAK_SCRIPT="${AZUL_DIR}/setup-keycloak.sh"
 # Source certificate functions (patch_ca_into_chart, create_keycloak_cert, etc.)
 source "${AZUL_DIR}/scripts/setup-certs.sh"
 
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"  # Set via environment or .azul-credentials
+# --- Pre-flight: ensure python3 bcrypt module is available ---
+# Required for OpenSearch internal_users password hashing.
+# RHEL 9: dnf install python3-bcrypt  |  Ubuntu: apt install python3-bcrypt
+if ! python3 -c "import bcrypt" >/dev/null 2>&1; then
+    echo "[WARN] Python bcrypt module not found. Attempting pip install..."
+    python3 -m pip install --quiet bcrypt 2>/dev/null || \
+    python3 -m pip install --quiet --user bcrypt 2>/dev/null || \
+    { echo "[FATAL] Cannot install bcrypt. Run: dnf install python3-bcrypt (RHEL) or apt install python3-bcrypt (Ubuntu)"; exit 1; }
+fi
 
 # --- Helpers ---
 
@@ -107,6 +116,37 @@ wait_for_pods() {
     log "WARNING: Not all pods ready in $namespace after ${timeout}s"
     kubectl get pods -n "$namespace" $selector --no-headers 2>/dev/null | grep -v "Running\|Completed" || true
     return 1
+}
+
+print_access_info() {
+    log ""
+    log "============================================"
+    log "  AZUL ACCESS INFORMATION"
+    log "============================================"
+    log ""
+    log "  URLs:"
+    log "    Web UI:      https://${AZUL_HOST}"
+    log "    Keycloak:    https://${KEYCLOAK_HOST}"
+    log "    OpenSearch:  https://${OPENSEARCH_HOST}"
+    log "    MinIO:       https://${MINIO_HOST}"
+    log ""
+    log "  Accounts:"
+    log "    Test user:   ${TEST_USER} / ${TEST_PASSWORD}"
+    log "    Admin user:  ${ADMIN_USER} / ${ADMIN_PASSWORD}"
+    log ""
+    log "  Keycloak Admin:"
+    log "    Username:    admin"
+    local kc_pass=""
+    if [ -f "$CREDS_FILE" ]; then
+        kc_pass=$(grep '^KC_ADMIN_PASSWORD=' "$CREDS_FILE" 2>/dev/null | cut -d= -f2) || true
+    fi
+    if [ -n "$kc_pass" ]; then
+        log "    Password:    $kc_pass"
+    else
+        log "    Password:    (see .azul-credentials)"
+    fi
+    log ""
+    log "============================================"
 }
 
 # ===================================================================
@@ -275,6 +315,7 @@ stage_infra() {
     send_discord "Stage 1: Infrastructure" "success" "All infra pods running, Keycloak configured"
     log ""
     log "=== STAGE 1 COMPLETE ==="
+    print_access_info
 }
 
 run_opensearch_bootstrap() {
@@ -341,39 +382,40 @@ configure_coredns() {
     local COREFILE
     COREFILE=$(kubectl get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}' 2>/dev/null)
 
-    if echo "$COREFILE" | grep -q "keycloak-azul.kp.local"; then
+    if echo "$COREFILE" | grep -q "${KEYCLOAK_HOST}"; then
         log "CoreDNS already has azul hosts entries"
         return 0
     fi
 
     log "Adding azul hosts block to CoreDNS..."
-    # Insert hosts block before the first 'forward' directive
-    NEW_COREFILE=$(echo "$COREFILE" | python3 -c "
-import sys
-content = sys.stdin.read()
-hosts_block = '''    hosts {
-        192.168.66.201 keycloak-azul.kp.local
-        192.168.66.201 opensearch-azul.kp.local
-        192.168.66.201 azul.kp.local
+
+    # Build hosts block with variables expanded by shell
+    local HOSTS_BLOCK="    hosts {
+        ${CLUSTER_IP} ${KEYCLOAK_HOST}
+        ${CLUSTER_IP} ${OPENSEARCH_HOST}
+        ${CLUSTER_IP} ${AZUL_HOST}
         fallthrough
-    }
-'''
-# Insert before 'forward' line
+    }"
+
+    # Insert hosts block before the first 'forward' directive
+    NEW_COREFILE=$(echo "$COREFILE" | HOSTS_BLOCK="$HOSTS_BLOCK" python3 -c "
+import sys, os
+content = sys.stdin.read()
+hosts_block = os.environ['HOSTS_BLOCK']
 lines = content.split('\n')
 result = []
 inserted = False
 for line in lines:
     if 'forward' in line and not inserted:
-        result.append(hosts_block.rstrip())
+        result.append(hosts_block)
         inserted = True
     result.append(line)
 if not inserted:
-    # Fallback: insert before closing brace
     result2 = []
     for line in reversed(result):
         if line.strip() == '}' and not inserted:
             result2.append(line)
-            result2.append(hosts_block.rstrip())
+            result2.append(hosts_block)
             inserted = True
         else:
             result2.append(line)
@@ -438,7 +480,7 @@ verify_infra() {
     log "Checking Keycloak..."
     local kc_code
     kc_code=$(curl -k -sf -o /dev/null -w '%{http_code}' \
-        -H "Host: keycloak-azul.kp.local" https://192.168.66.201/realms/azul 2>/dev/null || echo "000")
+        -H "Host: ${KEYCLOAK_HOST}" https://${CLUSTER_IP}/realms/azul 2>/dev/null || echo "000")
     if [ "$kc_code" = "200" ]; then
         log "Keycloak azul realm: OK ($kc_code)"
     else
@@ -544,8 +586,8 @@ print(json.dumps(s))
     # S3 backup keys (for recovery/backup feature — uses external MinIO on the host)
     if ! kubectl get secret s3-backup-keys -n azul >/dev/null 2>&1; then
         kubectl create secret generic s3-backup-keys -n azul \
-            --from-literal=access_key="azul-backup" \
-            --from-literal=secret_key="azul-backup-secret"
+            --from-literal=access_key="${BACKUP_S3_USER}" \
+            --from-literal=secret_key="${BACKUP_S3_PASSWORD}"
         log "Created secret: s3-backup-keys"
     else
         log "Secret s3-backup-keys already exists"
@@ -572,7 +614,18 @@ print(json.dumps(s))
     log ""
     log "--- 2.3 Waiting for core pods ---"
     # Core pods: redis, docs, 5x dispatchers, 4x metastores, restapi, webui = 13
+    # Metastore ingest pods crash-loop 3-4 times on startup (race with dispatchers).
+    # This is expected and self-resolves. First wait gets most pods up, second
+    # wait gives metastores time to recover.
     wait_for_pods "azul" 300 || true
+
+    # Check if only metastore pods are still restarting
+    local crashloop
+    crashloop=$(kubectl get pods -n azul --no-headers 2>/dev/null | grep "CrashLoopBackOff\|Error" | wc -l) || crashloop=0
+    if [ "$crashloop" -gt 0 ]; then
+        log "Metastore pods still restarting ($crashloop) — this is expected, waiting up to 5 more minutes..."
+        wait_for_pods "azul" 300 || true
+    fi
 
     # --- 2.4 Verify ---
     log ""
@@ -582,6 +635,7 @@ print(json.dumps(s))
     send_discord "Stage 2: Application" "success" "Core pods running, Web UI accessible, API authenticated"
     log ""
     log "=== STAGE 2 COMPLETE ==="
+    print_access_info
 }
 
 verify_app() {
@@ -604,7 +658,7 @@ verify_app() {
     log "Checking Web UI..."
     local web_code
     web_code=$(curl -k -sf -o /dev/null -w '%{http_code}' \
-        -H "Host: azul.kp.local" https://192.168.66.201/ 2>/dev/null || echo "000")
+        -H "Host: ${AZUL_HOST}" https://${CLUSTER_IP}/ 2>/dev/null || echo "000")
     if [ "$web_code" = "200" ] || [ "$web_code" = "302" ] || [ "$web_code" = "301" ]; then
         log "Web UI: OK ($web_code)"
     else
@@ -616,21 +670,21 @@ verify_app() {
     log "Testing OIDC authentication..."
     local token
     token=$(curl -k -sf -X POST \
-        "https://keycloak-azul.kp.local/realms/azul/protocol/openid-connect/token" \
-        --resolve "keycloak-azul.kp.local:443:192.168.66.201" \
+        "https://${KEYCLOAK_HOST}/realms/azul/protocol/openid-connect/token" \
+        --resolve "${KEYCLOAK_HOST}:443:${CLUSTER_IP}" \
         -H 'Content-Type: application/x-www-form-urlencoded' \
-        -d 'username=basic&password=basic12345&grant_type=password&client_id=azul-web' \
+        -d "username=${TEST_USER}&password=${TEST_PASSWORD}&grant_type=password&client_id=azul-web" \
         2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
 
     if [ -n "$token" ]; then
-        log "OAuth token obtained for test user 'basic'"
+        log "OAuth token obtained for test user '${TEST_USER}'"
 
         # Test API with token
         local api_code
         api_code=$(curl -k -sf -o /dev/null -w '%{http_code}' \
-            -H "Host: azul.kp.local" \
+            -H "Host: ${AZUL_HOST}" \
             -H "Authorization: Bearer $token" \
-            "https://192.168.66.201/api/v0/users/me" 2>/dev/null || echo "000")
+            "https://${CLUSTER_IP}/api/v0/users/me" 2>/dev/null || echo "000")
 
         if [ "$api_code" = "200" ]; then
             log "API /users/me: OK ($api_code)"
@@ -723,6 +777,7 @@ stage_plugins() {
     send_discord "Stage 3: Plugins" "success" "All pods running (core + plugins)"
     log ""
     log "=== STAGE 3 COMPLETE ==="
+    print_access_info
 }
 
 verify_plugins() {
@@ -804,12 +859,6 @@ case "$ACTION" in
         log "============================================"
         log ""
         log "Azul is fully deployed."
-        log "  Web UI: https://azul.kp.local"
-        log "  Keycloak: https://keycloak-azul.kp.local"
-        log "  OpenSearch: https://opensearch-azul.kp.local"
-        log "  Test user: basic / basic12345"
-        log "  Admin user: azuladmin / admin12345"
-        log ""
         kubectl get pods -n azul --no-headers | wc -l | xargs -I{} log "Total pods in azul namespace: {}"
         send_discord "Full Deploy (3 stages)" "success" "All stages complete, Azul fully operational"
         ;;

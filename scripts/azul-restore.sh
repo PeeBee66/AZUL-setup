@@ -19,19 +19,19 @@
 # Compatible with: Ubuntu 22.04+, RHEL 9+
 set -euo pipefail
 
-export KUBECONFIG="/home/kp-admin/KUBS/kubeconfig"
+# Source central config
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../azul.conf"
 
-AZUL_DIR="/data/AZUL"
 VALUES_FILE="${AZUL_DIR}/azul-values.yaml"
 COMPOSE_FILE="${AZUL_DIR}/docker-compose-backup.yaml"
 CHART_DIR="${AZUL_DIR}/azul-app/azul"
 NAMESPACE="azul"
 RELEASE="azul"
 
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}"  # Set via environment or .azul-credentials
-
-BACKUP_S3_ACCESS="azul-backup"
-BACKUP_S3_SECRET="azul-backup-secret"
+# External MinIO credentials (from azul.conf)
+BACKUP_S3_ACCESS="${BACKUP_S3_USER}"
+BACKUP_S3_SECRET="${BACKUP_S3_PASSWORD}"
 
 # --- Helpers ---
 
@@ -98,7 +98,7 @@ cmd_check() {
     log "Expected buckets: azul-backup-${label}-streams, azul-backup-${label}-events"
 
     # Check external MinIO
-    if ! curl -sf -o /dev/null "http://localhost:9100/minio/health/live" 2>/dev/null; then
+    if ! curl -sf -o /dev/null "http://localhost:${BACKUP_MINIO_PORT}/minio/health/live" 2>/dev/null; then
         log "External MinIO is NOT running"
         log "Start it with: docker compose -f $COMPOSE_FILE up -d"
         return 1
@@ -106,23 +106,23 @@ cmd_check() {
     log "External MinIO: HEALTHY"
 
     # Check backup data directory
-    if [ -d /data/backups/azul-minio ]; then
+    if [ -d ${BACKUP_DIR} ]; then
         local size
-        size=$(du -sh /data/backups/azul-minio 2>/dev/null | cut -f1)
-        log "Backup data directory: /data/backups/azul-minio ($size)"
+        size=$(du -sh ${BACKUP_DIR} 2>/dev/null | cut -f1)
+        log "Backup data directory: ${BACKUP_DIR} ($size)"
 
         # List bucket directories
-        if [ -d "/data/backups/azul-minio/azul-backup-${label}-streams" ]; then
+        if [ -d "${BACKUP_DIR}/azul-backup-${label}-streams" ]; then
             local streams_size
-            streams_size=$(du -sh "/data/backups/azul-minio/azul-backup-${label}-streams" 2>/dev/null | cut -f1)
+            streams_size=$(du -sh "${BACKUP_DIR}/azul-backup-${label}-streams" 2>/dev/null | cut -f1)
             log "  Streams bucket: azul-backup-${label}-streams ($streams_size)"
         else
             log "  Streams bucket: NOT FOUND"
         fi
 
-        if [ -d "/data/backups/azul-minio/azul-backup-${label}-events" ]; then
+        if [ -d "${BACKUP_DIR}/azul-backup-${label}-events" ]; then
             local events_size
-            events_size=$(du -sh "/data/backups/azul-minio/azul-backup-${label}-events" 2>/dev/null | cut -f1)
+            events_size=$(du -sh "${BACKUP_DIR}/azul-backup-${label}-events" 2>/dev/null | cut -f1)
             log "  Events bucket: azul-backup-${label}-events ($events_size)"
         else
             log "  Events bucket: NOT FOUND"
@@ -154,28 +154,28 @@ cmd_restore() {
 
     log "=== Starting Azul Restore ==="
     log "Label: $label"
-    log "Source: External MinIO at 192.168.66.41:9100"
+    log "Source: External MinIO at ${FILESERVER_IP}:${BACKUP_MINIO_PORT}"
     log "Buckets: azul-backup-${label}-streams, azul-backup-${label}-events"
 
     # --- Pre-flight checks ---
 
     # 1. External MinIO must be running
-    if ! curl -sf -o /dev/null "http://localhost:9100/minio/health/live" 2>/dev/null; then
+    if ! curl -sf -o /dev/null "http://localhost:${BACKUP_MINIO_PORT}/minio/health/live" 2>/dev/null; then
         log "External MinIO not running, starting it..."
         local compose_cmd
         compose_cmd=$(detect_compose)
         $compose_cmd -f "$COMPOSE_FILE" up -d
         sleep 10
-        if ! curl -sf -o /dev/null "http://localhost:9100/minio/health/live" 2>/dev/null; then
+        if ! curl -sf -o /dev/null "http://localhost:${BACKUP_MINIO_PORT}/minio/health/live" 2>/dev/null; then
             die "External MinIO failed to start"
         fi
     fi
     log "External MinIO: HEALTHY"
 
     # 2. Check backup data exists
-    if [ ! -d "/data/backups/azul-minio/azul-backup-${label}-streams" ] && \
-       [ ! -d "/data/backups/azul-minio/azul-backup-${label}-events" ]; then
-        die "No backup data found for label '$label'. Check /data/backups/azul-minio/"
+    if [ ! -d "${BACKUP_DIR}/azul-backup-${label}-streams" ] && \
+       [ ! -d "${BACKUP_DIR}/azul-backup-${label}-events" ]; then
+        die "No backup data found for label '$label'. Check ${BACKUP_DIR}/"
     fi
     log "Backup data found for label '$label'"
 

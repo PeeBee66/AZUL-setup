@@ -1,0 +1,21 @@
+# AZUL Application Core Images
+# Used by: azul Helm chart (core deployments)
+# Stage: app
+
+# Core AZUL components (docker.io/asdazul/*)
+docker.io/asdazul/dispatcher:9.0.0
+docker.io/asdazul/restapi-server:9.0.0
+docker.io/asdazul/webui:9.0.0
+docker.io/asdazul/docs:9.0.0
+docker.io/asdazul/client:9.0.0
+docker.io/asdazul/backup:9.0.0
+docker.io/asdazul/audit-forwarder:9.0.0
+docker.io/asdazul/stats:9.0.0
+docker.io/asdazul/nsrl-lookup-server:9.0.0
+docker.io/asdazul/scaler:9.0.0
+docker.io/asdazul/smart-string-filter:9.0.0
+
+# External dependencies
+docker.io/redis:8.4.0-bookworm
+docker.io/grafana/alloy:v1.11.2
+ghcr.io/linkedin/burrow/burrow:v1.9.5

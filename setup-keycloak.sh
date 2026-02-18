@@ -3,13 +3,16 @@
 # Configures: realm, roles, groups, client scopes, clients, test user
 set -e
 
-export KUBECONFIG=/home/kp-admin/KUBS/kubeconfig
+# Source central config
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/azul.conf"
+
 KC_PASS=$(kubectl get secret keycloak -n azul-infra -o jsonpath='{.data.KEYCLOAK_ADMIN_PASSWORD}' | base64 -d)
 KC_PASS_ENCODED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$KC_PASS")
-KC_URL="http://localhost:18080"
+KC_URL="http://localhost:${KC_LOCAL_PORT}"
 
 # Start port-forward
-kubectl port-forward svc/keycloak -n azul-infra 18080:8080 &
+kubectl port-forward svc/keycloak -n azul-infra ${KC_LOCAL_PORT}:8080 &
 PF_PID=$!
 sleep 4
 
@@ -106,7 +109,7 @@ api POST "/admin/realms/azul/client-scopes/${AUDIENCE_SCOPE_ID}/protocol-mappers
 
 echo ""
 echo "=== 6. Create azul-web client (public, for Web UI) ==="
-api POST "/admin/realms/azul/clients" '{"clientId":"azul-web","enabled":true,"publicClient":true,"standardFlowEnabled":true,"directAccessGrantsEnabled":true,"rootUrl":"https://azul.kp.local","redirectUris":["https://azul.kp.local/*","http://localhost:*"],"webOrigins":["https://azul.kp.local","*"],"defaultClientScopes":["openid","profile","email","azul","audience"],"optionalClientScopes":["offline_access"]}'
+api POST "/admin/realms/azul/clients" "{\"clientId\":\"azul-web\",\"enabled\":true,\"publicClient\":true,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":true,\"rootUrl\":\"https://${AZUL_HOST}\",\"redirectUris\":[\"https://${AZUL_HOST}/*\",\"http://localhost:*\"],\"webOrigins\":[\"https://${AZUL_HOST}\",\"*\"],\"defaultClientScopes\":[\"openid\",\"profile\",\"email\",\"azul\",\"audience\"],\"optionalClientScopes\":[\"offline_access\"]}"
 
 # Explicitly add 'roles' and 'offline_access' as optional client scopes via PUT API
 # (the optionalClientScopes array in POST body is not always reliably applied by Keycloak)
@@ -134,18 +137,18 @@ api PUT "/admin/realms/azul/clients/${WEB_CLIENT_UUID}/optional-client-scopes/${
 
 echo ""
 echo "=== 7. Create opensearch-dashboards client (confidential) ==="
-api POST "/admin/realms/azul/clients" '{"clientId":"opensearch-dashboards","enabled":true,"publicClient":false,"standardFlowEnabled":true,"directAccessGrantsEnabled":false,"rootUrl":"https://opensearch-azul.kp.local","redirectUris":["https://opensearch-azul.kp.local/*"],"webOrigins":["https://opensearch-azul.kp.local"],"secret":"opensearch-dashboards-secret","defaultClientScopes":["openid","profile","email","azul"]}'
+api POST "/admin/realms/azul/clients" "{\"clientId\":\"opensearch-dashboards\",\"enabled\":true,\"publicClient\":false,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,\"rootUrl\":\"https://${OPENSEARCH_HOST}\",\"redirectUris\":[\"https://${OPENSEARCH_HOST}/*\"],\"webOrigins\":[\"https://${OPENSEARCH_HOST}\"],\"secret\":\"opensearch-dashboards-secret\",\"defaultClientScopes\":[\"openid\",\"profile\",\"email\",\"azul\"]}"
 
 echo ""
 echo "=== 8. Create azul-service client (service account for API) ==="
 api POST "/admin/realms/azul/clients" '{"clientId":"azul-service","enabled":true,"publicClient":false,"serviceAccountsEnabled":true,"standardFlowEnabled":false,"directAccessGrantsEnabled":false,"secret":"azul-service-secret","defaultClientScopes":["openid","profile","azul"]}'
 
 echo ""
-echo "=== 9. Create test user: basic / basic12345 ==="
-api POST "/admin/realms/azul/users" '{"username":"basic","enabled":true,"emailVerified":true,"firstName":"Test","lastName":"User","email":"basic@azul.local","credentials":[{"type":"password","value":"basic12345","temporary":false}]}'
+echo "=== 9. Create test user: ${TEST_USER} / ${TEST_PASSWORD} ==="
+api POST "/admin/realms/azul/users" "{\"username\":\"${TEST_USER}\",\"enabled\":true,\"emailVerified\":true,\"firstName\":\"Test\",\"lastName\":\"User\",\"email\":\"${TEST_USER}@${DOMAIN}\",\"credentials\":[{\"type\":\"password\",\"value\":\"${TEST_PASSWORD}\",\"temporary\":false}]}"
 
 # Get user ID
-USER_ID=$(api_get "/admin/realms/azul/users?username=basic" | python3 -c "
+USER_ID=$(api_get "/admin/realms/azul/users?username=${TEST_USER}" | python3 -c "
 import sys, json
 users = json.load(sys.stdin)
 if users: print(users[0]['id'])
@@ -182,10 +185,10 @@ echo "  General group ID: $GENERAL_GID"
 api PUT "/admin/realms/azul/users/${USER_ID}/groups/${GENERAL_GID}" '{}'
 
 echo ""
-echo "=== 11. Create admin user: admin / admin12345 ==="
-api POST "/admin/realms/azul/users" '{"username":"azuladmin","enabled":true,"emailVerified":true,"firstName":"Admin","lastName":"User","email":"admin@azul.local","credentials":[{"type":"password","value":"admin12345","temporary":false}]}'
+echo "=== 11. Create admin user: ${ADMIN_USER} / ${ADMIN_PASSWORD} ==="
+api POST "/admin/realms/azul/users" "{\"username\":\"${ADMIN_USER}\",\"enabled\":true,\"emailVerified\":true,\"firstName\":\"Admin\",\"lastName\":\"User\",\"email\":\"${ADMIN_USER}@${DOMAIN}\",\"credentials\":[{\"type\":\"password\",\"value\":\"${ADMIN_PASSWORD}\",\"temporary\":false}]}"
 
-ADMIN_USER_ID=$(api_get "/admin/realms/azul/users?username=azuladmin" | python3 -c "
+ADMIN_USER_ID=$(api_get "/admin/realms/azul/users?username=${ADMIN_USER}" | python3 -c "
 import sys, json
 users = json.load(sys.stdin)
 if users: print(users[0]['id'])
@@ -222,9 +225,9 @@ api_get "/admin/realms/azul/users" | python3 -c "import sys,json; [print(f'  - {
 echo ""
 echo "=== KEYCLOAK CONFIGURATION COMPLETE ==="
 echo ""
-echo "OIDC Discovery URL: https://keycloak-azul.kp.local/realms/azul/.well-known/openid-configuration"
-echo "Authority URL: https://keycloak-azul.kp.local/realms/azul"
+echo "OIDC Discovery URL: https://${KEYCLOAK_HOST}/realms/azul/.well-known/openid-configuration"
+echo "Authority URL: https://${KEYCLOAK_HOST}/realms/azul"
 echo "Client ID (Web UI): azul-web"
 echo "Client ID (OpenSearch): opensearch-dashboards (secret: opensearch-dashboards-secret)"
-echo "Test user: basic / basic12345"
-echo "Admin user: azuladmin / admin12345"
+echo "Test user: ${TEST_USER} / ${TEST_PASSWORD}"
+echo "Admin user: ${ADMIN_USER} / ${ADMIN_PASSWORD}"
