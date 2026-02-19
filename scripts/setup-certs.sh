@@ -32,7 +32,10 @@ fi
 # Source central config if not already loaded
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -z "${AZUL_DIR:-}" ]; then
-    source "${SCRIPT_DIR}/../azul.conf"
+    AZUL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    source "${AZUL_DIR}/azul.conf"
+    FILESERVER="${SERVICE_IP}:${FILESERVER_PORT}"
+    REGISTRY="${SERVICE_IP}:${REGISTRY_PORT}"
 fi
 INFRA_CHART="${INFRA_CHART:-${AZUL_DIR}/azul-app/infra}"
 INFRA_VALUES="${INFRA_VALUES:-${AZUL_DIR}/azul-infra-values.yaml}"
@@ -110,7 +113,7 @@ create_keycloak_cert() {
         return 0
     fi
 
-    cat <<'EOF' | kubectl apply -f -
+    cat <<EOF | kubectl apply -f -
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -170,7 +173,7 @@ EOISSUER
     fi
 
     # Create Certificate
-    cat <<'EOCERT' | kubectl apply -f -
+    cat <<EOCERT | kubectl apply -f -
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:

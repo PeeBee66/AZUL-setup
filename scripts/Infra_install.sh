@@ -92,14 +92,17 @@ set -euo pipefail
 
 # Source central config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../azul.conf"
+AZUL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${AZUL_DIR}/azul.conf"
+FILESERVER="${SERVICE_IP}:${FILESERVER_PORT}"
+REGISTRY="${SERVICE_IP}:${REGISTRY_PORT}"
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 INFRA_CHART="${AZUL_DIR}/azul-app/infra"
 INFRA_VALUES="${AZUL_DIR}/azul-infra-values.yaml"
 CREDS_FILE="${AZUL_DIR}/.azul-credentials"
 CERTS_SCRIPT="${AZUL_DIR}/scripts/setup-certs.sh"
-KEYCLOAK_SCRIPT="${AZUL_DIR}/setup-keycloak.sh"
+KEYCLOAK_SCRIPT="${AZUL_DIR}/scripts/setup-keycloak.sh"
 
 STRIMZI_CHART="${AZUL_DIR}/charts/strimzi-kafka-operator-helm-3-chart-0.50.0.tgz"
 OPENSEARCH_CHART="${AZUL_DIR}/charts/opensearch-operator-2.8.0.tgz"

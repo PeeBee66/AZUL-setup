@@ -24,10 +24,13 @@ set -euo pipefail
 
 # Source central config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../azul.conf"
+AZUL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${AZUL_DIR}/azul.conf"
+FILESERVER="${SERVICE_IP}:${FILESERVER_PORT}"
+REGISTRY="${SERVICE_IP}:${REGISTRY_PORT}"
 
 VALUES_FILE="${AZUL_DIR}/azul-values.yaml"
-COMPOSE_FILE="${AZUL_DIR}/docker-compose-backup.yaml"
+COMPOSE_FILE="${AZUL_DIR}/docs/docker-compose-backup.yaml"
 CHART_DIR="${AZUL_DIR}/azul-app/azul"
 NAMESPACE="azul"
 RELEASE="azul"
@@ -205,14 +208,14 @@ with open('$VALUES_FILE') as f:
     log "=== Azul Backup STARTED ==="
     log "Mode: continuous (backup pod runs until stopped)"
     log "Label: $label"
-    log "Target: External MinIO at ${FILESERVER_IP}:${BACKUP_MINIO_PORT}"
+    log "Target: External MinIO at ${SERVICE_IP}:${BACKUP_MINIO_PORT}"
     log "Buckets: azul-backup-${label}-streams, azul-backup-${label}-events"
-    log "Console: http://${FILESERVER_IP}:${BACKUP_MINIO_CONSOLE_PORT} (${BACKUP_S3_USER}/${BACKUP_S3_PASSWORD})"
+    log "Console: http://${SERVICE_IP}:${BACKUP_MINIO_PORT} (${BACKUP_S3_USER}/${BACKUP_S3_PASSWORD})"
     log ""
     log "To stop: $0 stop"
     log "To check: $0 status"
 
-    send_discord "Backup Start" "success" "Backup pod running, label=$label, target=${FILESERVER_IP}:${BACKUP_MINIO_PORT}"
+    send_discord "Backup Start" "success" "Backup pod running, label=$label, target=${SERVICE_IP}:${BACKUP_MINIO_PORT}"
 }
 
 cmd_stop() {
@@ -273,7 +276,7 @@ cmd_status() {
     log "External MinIO:"
     if curl -sf -o /dev/null "http://localhost:${BACKUP_MINIO_PORT}/minio/health/live" 2>/dev/null; then
         log "  Status: HEALTHY (port ${BACKUP_MINIO_PORT})"
-        log "  Console: http://${FILESERVER_IP}:${BACKUP_MINIO_CONSOLE_PORT}"
+        log "  Console: http://${SERVICE_IP}:${BACKUP_MINIO_PORT}"
         log "  Data dir: ${BACKUP_DIR}/"
 
         # List buckets if mc is available (optional)

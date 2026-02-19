@@ -25,9 +25,12 @@
 # Compatible with: Ubuntu 22.04+, RHEL 9+
 set -euo pipefail
 
-# Source central config (sets KUBECONFIG, CLUSTER_IP, DOMAIN, AZUL_DIR, etc.)
+# Source central config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../azul.conf"
+AZUL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${AZUL_DIR}/azul.conf"
+FILESERVER="${SERVICE_IP}:${FILESERVER_PORT}"
+REGISTRY="${SERVICE_IP}:${REGISTRY_PORT}"
 
 INFRA_VALUES="${AZUL_DIR}/azul-infra-values.yaml"
 CORE_VALUES="${AZUL_DIR}/azul-values-core.yaml"
@@ -35,7 +38,7 @@ FULL_VALUES="${AZUL_DIR}/azul-values.yaml"
 INFRA_CHART="${AZUL_DIR}/azul-app/infra"
 APP_CHART="${AZUL_DIR}/azul-app/azul"
 CREDS_FILE="${AZUL_DIR}/.azul-credentials"
-KEYCLOAK_SCRIPT="${AZUL_DIR}/setup-keycloak.sh"
+KEYCLOAK_SCRIPT="${AZUL_DIR}/scripts/setup-keycloak.sh"
 
 # Source certificate functions (patch_ca_into_chart, create_keycloak_cert, etc.)
 source "${AZUL_DIR}/scripts/setup-certs.sh"

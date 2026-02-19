@@ -21,10 +21,13 @@ set -euo pipefail
 
 # Source central config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../azul.conf"
+AZUL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${AZUL_DIR}/azul.conf"
+FILESERVER="${SERVICE_IP}:${FILESERVER_PORT}"
+REGISTRY="${SERVICE_IP}:${REGISTRY_PORT}"
 
 VALUES_FILE="${AZUL_DIR}/azul-values.yaml"
-COMPOSE_FILE="${AZUL_DIR}/docker-compose-backup.yaml"
+COMPOSE_FILE="${AZUL_DIR}/docs/docker-compose-backup.yaml"
 CHART_DIR="${AZUL_DIR}/azul-app/azul"
 NAMESPACE="azul"
 RELEASE="azul"
@@ -154,7 +157,7 @@ cmd_restore() {
 
     log "=== Starting Azul Restore ==="
     log "Label: $label"
-    log "Source: External MinIO at ${FILESERVER_IP}:${BACKUP_MINIO_PORT}"
+    log "Source: External MinIO at ${SERVICE_IP}:${BACKUP_MINIO_PORT}"
     log "Buckets: azul-backup-${label}-streams, azul-backup-${label}-events"
 
     # --- Pre-flight checks ---

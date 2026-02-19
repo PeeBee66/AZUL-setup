@@ -40,7 +40,10 @@ set -euo pipefail
 
 # Source central config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../azul.conf"
+AZUL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${AZUL_DIR}/azul.conf"
+FILESERVER="${SERVICE_IP}:${FILESERVER_PORT}"
+REGISTRY="${SERVICE_IP}:${REGISTRY_PORT}"
 
 # Pre-flight: ensure python3 bcrypt module is available (RHEL 9 doesn't ship it)
 if ! python3 -c "import bcrypt" >/dev/null 2>&1; then

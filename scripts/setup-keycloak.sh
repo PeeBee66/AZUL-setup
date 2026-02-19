@@ -5,7 +5,8 @@ set -e
 
 # Source central config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/azul.conf"
+AZUL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${AZUL_DIR}/azul.conf"
 
 KC_PASS=$(kubectl get secret keycloak -n azul-infra -o jsonpath='{.data.KEYCLOAK_ADMIN_PASSWORD}' | base64 -d)
 KC_PASS_ENCODED=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$KC_PASS")

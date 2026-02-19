@@ -2,46 +2,47 @@
 # =================================================================
 # AZUL Deployment Framework
 # =================================================================
-# Wraps the existing Helm-based AZUL deployment with:
-#   - File server sync (from internal nginx at port 8888)
-#   - Container registry validation (private registry at port 5000)
+# Single entry point for AZUL deployment lifecycle:
+#   - File server sync (from internal nginx)
+#   - Container registry validation and push
 #   - Install/uninstall for each of the 3 stages
 #
 # Usage:
-#   azul-framework.sh sync                    Sync files from file server
-#   azul-framework.sh validate [section]      Check registry for required images
-#   azul-framework.sh push     [section]      Pull upstream images → push to registry
-#   azul-framework.sh install  [section]      Full install with pre-checks
-#   azul-framework.sh uninstall [section]     Clean uninstall
-#   azul-framework.sh status   [section]      Show current state
+#   azul-framework.sh sync <service-ip> [port]   Sync files from file server
+#   azul-framework.sh validate [section]          Check registry for required images
+#   azul-framework.sh push     [section]          Pull upstream images -> push to registry
+#   azul-framework.sh install  [section]          Full install with pre-checks
+#   azul-framework.sh uninstall [section]         Clean uninstall
+#   azul-framework.sh status   [section]          Show current state
 #
 # Sections: infra | app | plugins | all
+#
+# Bootstrap:
+#   curl -o azul-framework.sh http://<ip>:8888/AZUL/azul-framework.sh
+#   chmod +x azul-framework.sh
+#   ./azul-framework.sh sync <service-ip>
 #
 # Compatible with: Ubuntu 22.04+, RHEL 9+
 # =================================================================
 set -euo pipefail
 
-# Source central config — search multiple locations so the script works
-# both from the standard layout (scripts/azul-framework.sh) and when
-# downloaded standalone to a flat directory.
+# --- AZUL_DIR = directory where this script lives ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "${SCRIPT_DIR}/../azul.conf" ]; then
-    source "${SCRIPT_DIR}/../azul.conf"
-elif [ -f "${SCRIPT_DIR}/azul.conf" ]; then
-    source "${SCRIPT_DIR}/azul.conf"
-elif [ -f "${AZUL_DIR:-/data/AZUL}/azul.conf" ]; then
-    source "${AZUL_DIR:-/data/AZUL}/azul.conf"
-else
-    echo "ERROR: azul.conf not found. Place it next to this script or in the parent directory."
-    exit 1
+AZUL_DIR="$SCRIPT_DIR"
+
+# Source config if available (not present during first sync)
+if [ -f "${AZUL_DIR}/azul.conf" ]; then
+    source "${AZUL_DIR}/azul.conf"
 fi
 
-LOG_FILE="${AZUL_DIR}/framework.log"
+# Derived values (computed from static config, never stored in azul.conf)
+FILESERVER="${SERVICE_IP:-}:${FILESERVER_PORT:-8888}"
+REGISTRY="${SERVICE_IP:-}:${REGISTRY_PORT:-5000}"
 
+LOG_FILE="${AZUL_DIR}/framework.log"
 INFRA_IMAGES="${AZUL_DIR}/images-infra.txt"
 APP_IMAGES="${AZUL_DIR}/images-app.txt"
 PLUGINS_IMAGES="${AZUL_DIR}/images-plugins.txt"
-
 DEPLOY_SCRIPT="${AZUL_DIR}/scripts/azul-deploy.sh"
 TEARDOWN_SCRIPT="${AZUL_DIR}/scripts/azul-teardown.sh"
 
@@ -63,13 +64,13 @@ fi
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     echo "$msg"
-    echo "$msg" >> "$LOG_FILE"
+    [ -n "${LOG_FILE:-}" ] && echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 log_err() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*"
     echo "$msg" >&2
-    echo "$msg" >> "$LOG_FILE"
+    [ -n "${LOG_FILE:-}" ] && echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 die() {
@@ -77,7 +78,6 @@ die() {
     exit 1
 }
 
-# Print section header
 header() {
     log ""
     log "============================================"
@@ -118,14 +118,25 @@ print_access_info() {
 }
 
 # =================================================================
-# IMAGE MANIFEST HELPERS
+# TWO-COLUMN IMAGE MANIFEST HELPERS
 # =================================================================
 
-# Read image manifest file, stripping comments and blank lines
+# Read manifest, returning pipe-delimited lines: upstream|registry_path
 read_manifest() {
     local file="$1"
     [ -f "$file" ] || die "Manifest not found: $file"
-    grep -v '^#' "$file" | grep -v '^$'
+    grep -v '^#' "$file" | grep -v '^$' | sed 's/[[:space:]]*|[[:space:]]*/|/'
+}
+
+# Parse a manifest line into UPSTREAM_IMAGE and REGISTRY_PATH
+parse_manifest_line() {
+    local line="$1"
+    UPSTREAM_IMAGE="${line%%|*}"
+    UPSTREAM_IMAGE="${UPSTREAM_IMAGE%% }"
+    UPSTREAM_IMAGE="${UPSTREAM_IMAGE% }"
+    REGISTRY_PATH="${line##*|}"
+    REGISTRY_PATH="${REGISTRY_PATH## }"
+    REGISTRY_PATH="${REGISTRY_PATH# }"
 }
 
 # Get manifest file for a section
@@ -138,52 +149,26 @@ manifest_for() {
     esac
 }
 
-# Parse image into registry-compatible parts
-# Input:  docker.io/asdazul/dispatcher:9.0.0@sha256:...
-# Output: repo=asdazul/dispatcher tag=9.0.0
-parse_image() {
-    local image="$1"
-
-    # Strip digest (@sha256:...) if present
-    local no_digest="${image%%@*}"
-
-    # Strip registry prefix to get repo:tag
-    local repo_tag
-    case "$no_digest" in
-        docker.io/*)       repo_tag="${no_digest#docker.io/}" ;;
-        quay.io/*)         repo_tag="${no_digest#quay.io/}" ;;
-        gcr.io/*)          repo_tag="${no_digest#gcr.io/}" ;;
-        ghcr.io/*)         repo_tag="${no_digest#ghcr.io/}" ;;
-        registry.k8s.io/*) repo_tag="${no_digest#registry.k8s.io/}" ;;
-        */*:*)             repo_tag="$no_digest" ;;
-        *)                 repo_tag="library/$no_digest" ;;
-    esac
-
-    # Split into repo and tag
-    PARSED_REPO="${repo_tag%%:*}"
-    PARSED_TAG="${repo_tag##*:}"
-}
-
 # =================================================================
 # REGISTRY FUNCTIONS
 # =================================================================
 
-# Check if a single image exists in the private registry
-# Returns 0 if found, 1 if missing
+# Check if image exists in private registry using REGISTRY_PATH
+# Input: registry_path (e.g., "asdazul/dispatcher:9.0.0")
 check_image_in_registry() {
-    local image="$1"
-    parse_image "$image"
+    local registry_path="$1"
+    local repo="${registry_path%%:*}"
+    local tag="${registry_path##*:}"
 
-    local url="http://${REGISTRY}/v2/${PARSED_REPO}/tags/list"
+    local url="http://${REGISTRY}/v2/${repo}/tags/list"
     local response
     response=$(curl -sf "$url" 2>/dev/null) || return 1
 
-    # Check if our tag is in the response
     echo "$response" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 tags = data.get('tags', []) or []
-sys.exit(0 if '${PARSED_TAG}' in tags else 1)
+sys.exit(0 if '${tag}' in tags else 1)
 " 2>/dev/null
 }
 
@@ -198,13 +183,14 @@ validate_section() {
     local found=0 missing=0 total=0
     local missing_list=""
 
-    while IFS= read -r image; do
+    while IFS= read -r line; do
+        parse_manifest_line "$line"
         total=$((total + 1))
-        if check_image_in_registry "$image"; then
+        if check_image_in_registry "$REGISTRY_PATH"; then
             found=$((found + 1))
         else
             missing=$((missing + 1))
-            missing_list="${missing_list}  - ${image}\n"
+            missing_list="${missing_list}  - ${UPSTREAM_IMAGE} -> ${REGISTRY_PATH}\n"
         fi
     done < <(read_manifest "$manifest")
 
@@ -214,8 +200,8 @@ validate_section() {
     if [ "$missing" -gt 0 ]; then
         log ""
         log "  Missing images:"
-        echo -e "$missing_list" | while IFS= read -r line; do
-            [ -n "$line" ] && log "$line"
+        echo -e "$missing_list" | while IFS= read -r l; do
+            [ -n "$l" ] && log "$l"
         done
         return 1
     fi
@@ -224,21 +210,19 @@ validate_section() {
     return 0
 }
 
-# Push a single image to the private registry
+# Push a single image: pull upstream, tag for registry, push
 push_single_image() {
-    local image="$1"
-    parse_image "$image"
+    local upstream="$1" registry_path="$2"
+    local local_tag="${REGISTRY}/${registry_path}"
 
-    local local_tag="${REGISTRY}/${PARSED_REPO}:${PARSED_TAG}"
-
-    log "  Pulling: $image"
-    if ! $CONTAINER_RT pull "$image" 2>>"$LOG_FILE"; then
-        log_err "  Failed to pull: $image"
+    log "  Pulling: $upstream"
+    if ! $CONTAINER_RT pull "$upstream" 2>>"$LOG_FILE"; then
+        log_err "  Failed to pull: $upstream"
         return 1
     fi
 
     log "  Tagging: $local_tag"
-    $CONTAINER_RT tag "$image" "$local_tag" 2>>"$LOG_FILE"
+    $CONTAINER_RT tag "$upstream" "$local_tag" 2>>"$LOG_FILE"
 
     log "  Pushing: $local_tag"
     if ! $CONTAINER_RT push "$local_tag" 2>>"$LOG_FILE"; then
@@ -246,11 +230,10 @@ push_single_image() {
         return 1
     fi
 
-    # Verify push
-    if check_image_in_registry "$image"; then
-        log "  OK: $PARSED_REPO:$PARSED_TAG"
+    if check_image_in_registry "$registry_path"; then
+        log "  OK: $registry_path"
     else
-        log_err "  Push verification failed: $PARSED_REPO:$PARSED_TAG"
+        log_err "  Push verification failed: $registry_path"
         return 1
     fi
 }
@@ -263,27 +246,28 @@ push_section() {
 
     log "Checking $section images for push to ${REGISTRY}..."
 
-    local to_push=()
-    while IFS= read -r image; do
-        if ! check_image_in_registry "$image"; then
-            to_push+=("$image")
+    local to_push_upstream=() to_push_registry=()
+    while IFS= read -r line; do
+        parse_manifest_line "$line"
+        if ! check_image_in_registry "$REGISTRY_PATH"; then
+            to_push_upstream+=("$UPSTREAM_IMAGE")
+            to_push_registry+=("$REGISTRY_PATH")
         fi
     done < <(read_manifest "$manifest")
 
-    if [ ${#to_push[@]} -eq 0 ]; then
+    if [ ${#to_push_upstream[@]} -eq 0 ]; then
         log "All $section images already in registry. Nothing to push."
         return 0
     fi
 
-    log "${#to_push[@]} images need to be pushed for $section:"
-    for img in "${to_push[@]}"; do
-        parse_image "$img"
-        log "  - $PARSED_REPO:$PARSED_TAG"
+    log "${#to_push_upstream[@]} images need to be pushed for $section:"
+    for rp in "${to_push_registry[@]}"; do
+        log "  - $rp"
     done
 
     if [ "$FORCE" != "true" ]; then
         echo ""
-        read -rp "Download and push ${#to_push[@]} images to registry? (y/n): " confirm
+        read -rp "Download and push ${#to_push_upstream[@]} images to registry? (y/n): " confirm
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             log "Push cancelled by user."
             return 1
@@ -292,8 +276,8 @@ push_section() {
 
     log ""
     local pushed=0 failed=0
-    for img in "${to_push[@]}"; do
-        if push_single_image "$img"; then
+    for i in "${!to_push_upstream[@]}"; do
+        if push_single_image "${to_push_upstream[$i]}" "${to_push_registry[$i]}"; then
             pushed=$((pushed + 1))
         else
             failed=$((failed + 1))
@@ -301,8 +285,67 @@ push_section() {
     done
 
     log ""
-    log "Push complete: $pushed succeeded, $failed failed (of ${#to_push[@]} total)"
+    log "Push complete: $pushed succeeded, $failed failed (of ${#to_push_upstream[@]} total)"
     [ "$failed" -eq 0 ] && return 0 || return 1
+}
+
+# =================================================================
+# REGISTRY OVERRIDE GENERATION
+# =================================================================
+
+# Generate --set-string flags for Helm to use private registry images.
+# Reads image manifests and maps known upstream patterns to Helm value paths.
+generate_registry_overrides() {
+    local section="$1"
+    local overrides=""
+
+    case "$section" in
+        app|plugins)
+            # All asdazul/* images handled by customRegistry
+            overrides="--set-string images.customRegistry=${REGISTRY}/asdazul/"
+
+            # External images need individual overrides
+            local manifest
+            manifest=$(manifest_for "$section")
+            while IFS= read -r line; do
+                parse_manifest_line "$line"
+                local helm_key=""
+                case "$UPSTREAM_IMAGE" in
+                    *redis:*)     helm_key="images.external.redis" ;;
+                    *alloy:*)     helm_key="images.external.alloy" ;;
+                    *burrow:*)    helm_key="images.external.burrow" ;;
+                    *tika:*)      helm_key="images.external.tika_external" ;;
+                    *git-sync:*)  helm_key="images.external.git-sync" ;;
+                esac
+                if [ -n "$helm_key" ]; then
+                    overrides+=" --set-string ${helm_key}=${REGISTRY}/${REGISTRY_PATH}"
+                fi
+            done < <(read_manifest "$manifest")
+            ;;
+        infra)
+            local manifest
+            manifest=$(manifest_for infra)
+            while IFS= read -r line; do
+                parse_manifest_line "$line"
+                local helm_key=""
+                case "$UPSTREAM_IMAGE" in
+                    *minio/minio:*)
+                        overrides+=" --set-string minio.main.image=${REGISTRY}/${REGISTRY_PATH}"
+                        overrides+=" --set-string minio.backup.image=${REGISTRY}/${REGISTRY_PATH}"
+                        continue
+                        ;;
+                    *keycloak:*)  helm_key="keycloak.image" ;;
+                    *kafkactl:*)  helm_key="kafka.kafkactl.image" ;;
+                    *postgres:*)  helm_key="keycloak.postgres.image" ;;
+                esac
+                if [ -n "$helm_key" ]; then
+                    overrides+=" --set-string ${helm_key}=${REGISTRY}/${REGISTRY_PATH}"
+                fi
+            done < <(read_manifest "$manifest")
+            ;;
+    esac
+
+    echo "$overrides"
 }
 
 # =================================================================
@@ -312,24 +355,19 @@ push_section() {
 # Recursive directory download using curl (fallback when wget unavailable)
 sync_with_curl() {
     local dest="$1" url="$2" prefix="$3"
-
     mkdir -p "${dest}/${prefix}"
 
-    # Get directory listing, extract href links
     local listing
     listing=$(curl -sf "$url" 2>/dev/null) || return 1
 
-    # Parse hrefs from nginx autoindex page
     local links
     links=$(echo "$listing" | grep -oP 'href="\K[^"]+' | grep -v '^\.\.' | grep -v '^/$')
 
     for link in $links; do
         if [[ "$link" == */ ]]; then
-            # Directory — recurse
             sync_with_curl "$dest" "${url}${link}" "${prefix}/${link%/}"
         else
-            # File — download
-            curl -sf -o "${dest}/${prefix}/${link}" "${url}${link}" 2>>"$LOG_FILE" || \
+            curl -sf -o "${dest}/${prefix}/${link}" "${url}${link}" 2>>"${LOG_FILE:-/dev/null}" || \
                 log_err "Failed to download: ${url}${link}"
         fi
     done
@@ -338,7 +376,15 @@ sync_with_curl() {
 cmd_sync() {
     header "FILE SERVER SYNC"
 
-    local fileserver_url="http://${FILESERVER}/AZUL/"
+    # Server IP from argument, or from azul.conf if loaded
+    local server_ip="${SYNC_SERVER_IP:-${SERVICE_IP:-}}"
+    local server_port="${SYNC_SERVER_PORT:-${FILESERVER_PORT:-8888}}"
+
+    if [ -z "$server_ip" ]; then
+        die "No file server IP. Usage: $0 sync <service-ip> [port]"
+    fi
+
+    local fileserver_url="http://${server_ip}:${server_port}/AZUL/"
 
     # 1. Health check
     log "Checking file server at ${fileserver_url}..."
@@ -347,31 +393,29 @@ cmd_sync() {
     fi
     log "File server is reachable."
 
-    # 2. Download/update files
+    # 2. Download to staging
     log "Syncing files from file server..."
     local staging_dir
     staging_dir=$(mktemp -d /tmp/azul-sync.XXXXXX)
     trap "rm -rf '$staging_dir'" EXIT
 
-    # Use wget mirror mode to get the full tree
     if command -v wget >/dev/null 2>&1; then
         wget -q --mirror --no-parent --no-host-directories \
             --reject "index.html*" \
             --cut-dirs=0 \
             -P "$staging_dir" \
-            "${fileserver_url}" 2>>"$LOG_FILE" || die "wget sync failed"
+            "${fileserver_url}" 2>>"${LOG_FILE:-/dev/null}" || die "wget sync failed"
     elif command -v curl >/dev/null 2>&1; then
-        # curl fallback: parse directory listing and download files recursively
         log "wget not found, using curl fallback (install wget for better sync: dnf install wget)"
         sync_with_curl "$staging_dir" "${fileserver_url}" "AZUL"
     else
-        die "Neither wget nor curl found. Install wget: dnf install wget (RHEL) or apt install wget (Ubuntu)"
+        die "Neither wget nor curl found."
     fi
 
     # 3. Validate structure
     log "Validating downloaded structure..."
     local required_dirs=("AZUL/azul-app" "AZUL/scripts")
-    local required_files=("AZUL/azul-infra-values.yaml" "AZUL/azul-values.yaml" "AZUL/images-infra.txt")
+    local required_files=("AZUL/azul.conf" "AZUL/azul-infra-values.yaml" "AZUL/azul-values.yaml" "AZUL/images-infra.txt")
     local valid=true
 
     for dir in "${required_dirs[@]}"; do
@@ -392,41 +436,62 @@ cmd_sync() {
     fi
     log "Structure validated."
 
-    # 4. Copy files, preserving sensitive user files
+    # 4. Copy to AZUL_DIR, protecting sensitive files
     log "Copying synced files to ${AZUL_DIR}..."
-    local protected_files=(".azul-credentials" "azul-infra-values.yaml" "azul-values.yaml" "azul-values-core.yaml" "framework.log")
-
-    # Build rsync exclude list
-    local rsync_excludes=()
-    for pf in "${protected_files[@]}"; do
-        rsync_excludes+=(--exclude "$pf")
-    done
+    local protected_files=(".azul-credentials" "framework.log" "opensearch-ca.crt")
 
     if command -v rsync >/dev/null 2>&1; then
-        rsync -a "${rsync_excludes[@]}" "${staging_dir}/AZUL/" "${AZUL_DIR}/" 2>>"$LOG_FILE"
+        local rsync_excludes=()
+        for pf in "${protected_files[@]}"; do
+            rsync_excludes+=(--exclude "$pf")
+        done
+        rsync -a "${rsync_excludes[@]}" "${staging_dir}/AZUL/" "${AZUL_DIR}/" 2>>"${LOG_FILE:-/dev/null}"
     else
-        # Fallback: cp with manual protection
         for pf in "${protected_files[@]}"; do
             [ -f "${AZUL_DIR}/${pf}" ] && cp "${AZUL_DIR}/${pf}" "/tmp/azul-protect-${pf}" 2>/dev/null || true
         done
-        cp -rn "${staging_dir}/AZUL/"* "${AZUL_DIR}/" 2>>"$LOG_FILE" || true
+        cp -r "${staging_dir}/AZUL/"* "${AZUL_DIR}/" 2>>"${LOG_FILE:-/dev/null}" || true
         for pf in "${protected_files[@]}"; do
             [ -f "/tmp/azul-protect-${pf}" ] && mv "/tmp/azul-protect-${pf}" "${AZUL_DIR}/${pf}" 2>/dev/null || true
         done
     fi
 
-    # Make scripts executable
+    # 5. Make scripts executable
     chmod +x "${AZUL_DIR}/scripts/"*.sh 2>/dev/null || true
+    chmod +x "${AZUL_DIR}/azul-framework.sh" 2>/dev/null || true
+
+    # 6. Post-sync patches (upstream chart fixes)
+    patch_templates
+
+    # 7. Re-source config (may have been updated by sync)
+    if [ -f "${AZUL_DIR}/azul.conf" ]; then
+        source "${AZUL_DIR}/azul.conf"
+        FILESERVER="${SERVICE_IP}:${FILESERVER_PORT}"
+        REGISTRY="${SERVICE_IP}:${REGISTRY_PORT}"
+    fi
 
     log "Sync complete."
     log ""
-    log "Protected files (NOT overwritten):"
-    for pf in "${protected_files[@]}"; do
-        [ -f "${AZUL_DIR}/${pf}" ] && log "  - $pf"
-    done
+    log "Protected (NOT overwritten): ${protected_files[*]}"
+    log ""
+    log "Next steps:"
+    log "  1. Review azul.conf (edit on file server and re-sync if needed)"
+    log "  2. $0 validate all"
+    log "  3. $0 push all"
+    log "  4. $0 install infra"
 
     trap - EXIT
     rm -rf "$staging_dir"
+}
+
+# Post-sync template patches for upstream chart issues
+patch_templates() {
+    # Patch postgres.yaml: hardcoded image -> templatable value
+    local pg_template="${AZUL_DIR}/azul-app/infra/templates/keycloak/postgres.yaml"
+    if [ -f "$pg_template" ] && grep -q 'image: postgres:' "$pg_template"; then
+        sed -i 's|image: postgres:[0-9.]*|image: {{ .Values.keycloak.postgres.image \| default "postgres:17.4" }}|' "$pg_template"
+        log "Patched postgres.yaml for registry override support"
+    fi
 }
 
 # =================================================================
@@ -437,7 +502,6 @@ cmd_validate() {
     local section="${1:-all}"
     header "REGISTRY VALIDATION: $section"
 
-    # Check registry is reachable
     if ! curl -sf --connect-timeout 5 "http://${REGISTRY}/v2/" >/dev/null 2>&1; then
         die "Registry unreachable at http://${REGISTRY}"
     fi
@@ -476,12 +540,10 @@ cmd_push() {
     local section="${1:-all}"
     header "REGISTRY PUSH: $section"
 
-    # Check registry is reachable
     if ! curl -sf --connect-timeout 5 "http://${REGISTRY}/v2/" >/dev/null 2>&1; then
         die "Registry unreachable at http://${REGISTRY}"
     fi
 
-    # Check container runtime is available
     if [ -z "$CONTAINER_RT" ]; then
         die "Neither docker nor podman found. Install one to push images."
     fi
@@ -527,7 +589,6 @@ cmd_install() {
         install_section "$s"
     done
 
-    # Print access info after install completes
     print_access_info
 }
 
@@ -539,7 +600,7 @@ install_section() {
     # Phase 1: Verify files exist
     log "Phase 1: Checking required files..."
     if ! preflight_files "$section"; then
-        die "File pre-flight check failed for $section. Run: $0 sync"
+        die "File pre-flight check failed for $section. Run: $0 sync <service-ip>"
     fi
     log "  Files: OK"
 
@@ -577,34 +638,31 @@ install_section() {
     log "=== Section $section installed successfully ==="
 }
 
-# Check that required files exist for a section
 preflight_files() {
     local section="$1"
     local ok=true
 
-    # Common checks
-    [ -f "${AZUL_DIR}/.azul-credentials" ]      || { log_err "Missing: .azul-credentials"; ok=false; }
-    [ -d "${AZUL_DIR}/azul-app" ]                || { log_err "Missing: azul-app/ directory"; ok=false; }
+    [ -f "${AZUL_DIR}/.azul-credentials" ] || { log_err "Missing: .azul-credentials"; ok=false; }
+    [ -d "${AZUL_DIR}/azul-app" ]          || { log_err "Missing: azul-app/ directory"; ok=false; }
 
     case "$section" in
         infra)
-            [ -f "${AZUL_DIR}/azul-infra-values.yaml" ]   || { log_err "Missing: azul-infra-values.yaml"; ok=false; }
-            [ -d "${AZUL_DIR}/azul-app/infra" ]            || { log_err "Missing: azul-app/infra chart"; ok=false; }
-            [ -d "${AZUL_DIR}/charts" ]                    || { log_err "Missing: charts/ (operator tarballs)"; ok=false; }
-            [ -f "${AZUL_DIR}/scripts/setup-certs.sh" ]    || { log_err "Missing: scripts/setup-certs.sh"; ok=false; }
-            [ -f "${AZUL_DIR}/setup-keycloak.sh" ]         || { log_err "Missing: setup-keycloak.sh"; ok=false; }
+            [ -f "${AZUL_DIR}/azul-infra-values.yaml" ]    || { log_err "Missing: azul-infra-values.yaml"; ok=false; }
+            [ -d "${AZUL_DIR}/azul-app/infra" ]             || { log_err "Missing: azul-app/infra chart"; ok=false; }
+            [ -d "${AZUL_DIR}/charts" ]                     || { log_err "Missing: charts/ (operator tarballs)"; ok=false; }
+            [ -f "${AZUL_DIR}/scripts/setup-certs.sh" ]     || { log_err "Missing: scripts/setup-certs.sh"; ok=false; }
+            [ -f "${AZUL_DIR}/scripts/setup-keycloak.sh" ]  || { log_err "Missing: scripts/setup-keycloak.sh"; ok=false; }
             ;;
         app)
-            [ -f "${AZUL_DIR}/azul-values-core.yaml" ]    || { log_err "Missing: azul-values-core.yaml"; ok=false; }
-            [ -d "${AZUL_DIR}/azul-app/azul" ]             || { log_err "Missing: azul-app/azul chart"; ok=false; }
+            [ -f "${AZUL_DIR}/azul-values-core.yaml" ] || { log_err "Missing: azul-values-core.yaml"; ok=false; }
+            [ -d "${AZUL_DIR}/azul-app/azul" ]          || { log_err "Missing: azul-app/azul chart"; ok=false; }
             ;;
         plugins)
-            [ -f "${AZUL_DIR}/azul-values.yaml" ]          || { log_err "Missing: azul-values.yaml"; ok=false; }
-            [ -d "${AZUL_DIR}/azul-app/azul" ]             || { log_err "Missing: azul-app/azul chart"; ok=false; }
+            [ -f "${AZUL_DIR}/azul-values.yaml" ] || { log_err "Missing: azul-values.yaml"; ok=false; }
+            [ -d "${AZUL_DIR}/azul-app/azul" ]     || { log_err "Missing: azul-app/azul chart"; ok=false; }
             ;;
     esac
 
-    # Check image manifest
     local manifest
     manifest=$(manifest_for "$section")
     [ -f "$manifest" ] || { log_err "Missing manifest: $manifest"; ok=false; }
@@ -612,41 +670,33 @@ preflight_files() {
     [ "$ok" = "true" ]
 }
 
-# Post-install verification
 verify_section() {
     local section="$1"
 
     case "$section" in
         infra)
-            local ns="azul-infra"
-            local total
-            total=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
-            local running
-            running=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -c "Running") || running=0
+            local total running
+            total=$(kubectl get pods -n azul-infra --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
+            running=$(kubectl get pods -n azul-infra --no-headers 2>/dev/null | grep -c "Running") || running=0
             log "  azul-infra pods: $running running / $total total"
-
-            # Quick endpoint checks
             local kc_code
             kc_code=$(curl -k -sf -o /dev/null -w '%{http_code}' \
                 -H "Host: ${KEYCLOAK_HOST}" https://${CLUSTER_IP}/ 2>/dev/null || echo "000")
             log "  Keycloak: HTTP $kc_code"
             ;;
         app)
-            local total
+            local total running
             total=$(kubectl get pods -n azul --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
-            local running
             running=$(kubectl get pods -n azul --no-headers 2>/dev/null | grep -c "Running") || running=0
             log "  azul pods: $running running / $total total"
-
             local web_code
             web_code=$(curl -k -sf -o /dev/null -w '%{http_code}' \
                 -H "Host: ${AZUL_HOST}" https://${CLUSTER_IP}/ 2>/dev/null || echo "000")
             log "  Web UI: HTTP $web_code"
             ;;
         plugins)
-            local total
+            local total running
             total=$(kubectl get pods -n azul --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
-            local running
             running=$(kubectl get pods -n azul --no-headers 2>/dev/null | grep -c "Running") || running=0
             log "  azul pods (with plugins): $running running / $total total"
             ;;
@@ -664,23 +714,12 @@ cmd_uninstall() {
     if [ "$FORCE" != "true" ]; then
         log "This will remove the following:"
         case "$section" in
-            plugins)
-                log "  - Downgrade azul release to core-only (remove plugin deployments)"
-                ;;
-            app)
-                log "  - Helm release: azul"
-                log "  - Namespace: azul (all PVCs and data)"
-                ;;
-            infra)
-                log "  - Helm release: azul-infra"
-                log "  - Operators: strimzi-kafka-operator, opensearch-operator"
-                log "  - CRDs: Strimzi, OpenSearch"
-                log "  - Namespaces: azul-infra, kafka, opensearch-operator"
-                log "  - CoreDNS azul hosts block"
-                ;;
-            all)
-                log "  - ALL Azul resources (plugins → app → infra)"
-                ;;
+            plugins) log "  - Downgrade azul release to core-only (remove plugin deployments)" ;;
+            app)     log "  - Helm release: azul"; log "  - Namespace: azul (all PVCs and data)" ;;
+            infra)   log "  - Helm releases: azul-infra, strimzi, opensearch-operator"
+                     log "  - CRDs + namespaces: azul-infra, kafka, opensearch-operator"
+                     log "  - CoreDNS azul hosts block" ;;
+            all)     log "  - ALL Azul resources (plugins -> app -> infra)" ;;
         esac
         echo ""
         read -rp "Are you sure? Type 'yes' to proceed: " confirm
@@ -694,11 +733,7 @@ cmd_uninstall() {
         plugins) uninstall_plugins ;;
         app)     uninstall_app ;;
         infra)   uninstall_infra ;;
-        all)
-            uninstall_plugins
-            uninstall_app
-            uninstall_infra
-            ;;
+        all)     uninstall_plugins; uninstall_app; uninstall_infra ;;
     esac
 
     log ""
@@ -708,31 +743,17 @@ cmd_uninstall() {
 uninstall_plugins() {
     log ""
     log "--- Uninstalling plugins (downgrade to core-only) ---"
-
     if ! helm status azul -n azul >/dev/null 2>&1; then
-        log "Helm release 'azul' not found, skipping plugins uninstall"
+        log "Helm release 'azul' not found, skipping"
         return 0
     fi
-
     local core_values="${AZUL_DIR}/azul-values-core.yaml"
     local app_chart="${AZUL_DIR}/azul-app/azul"
-
     if [ -f "$core_values" ] && [ -d "$app_chart" ]; then
-        log "Downgrading azul to core-only values (disables plugins)..."
         helm upgrade azul "$app_chart" -n azul -f "$core_values" --timeout 10m
         log "Plugins removed via helm upgrade to core values"
-
-        # Clean up orphaned plugin pods
-        log "Cleaning up plugin pods..."
-        local plugin_deploys
-        plugin_deploys=$(kubectl get deployments -n azul --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null \
-            | grep -E "^plugin-" || true)
-        if [ -n "$plugin_deploys" ]; then
-            log "WARNING: ${plugin_deploys} plugin deployments still exist after downgrade"
-        fi
     else
-        log_err "Core values or chart not found. Cannot downgrade."
-        log "  Falling back to full uninstall of azul release..."
+        log_err "Core values or chart not found. Falling back to full uninstall."
         uninstall_app
     fi
 }
@@ -740,104 +761,55 @@ uninstall_plugins() {
 uninstall_app() {
     log ""
     log "--- Uninstalling azul app ---"
-
     if helm status azul -n azul >/dev/null 2>&1; then
-        if helm uninstall azul -n azul --timeout 5m; then
-            log "Helm release 'azul' uninstalled"
-        else
-            log_err "Failed to uninstall azul release"
-        fi
-    else
-        log "Helm release 'azul' not found, skipping"
+        helm uninstall azul -n azul --timeout 5m && log "Helm release 'azul' uninstalled" || log_err "Failed to uninstall azul"
     fi
-
-    # Delete PVCs
     if kubectl get namespace azul >/dev/null 2>&1; then
         local pvcs
         pvcs=$(kubectl get pvc -n azul -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
-        if [ -n "$pvcs" ]; then
-            for pvc in $pvcs; do
-                log "Deleting PVC: azul/$pvc"
-                kubectl delete pvc "$pvc" -n azul --timeout=60s 2>/dev/null || true
-            done
-        fi
-
+        for pvc in $pvcs; do
+            log "Deleting PVC: azul/$pvc"
+            kubectl delete pvc "$pvc" -n azul --timeout=60s 2>/dev/null || true
+        done
         log "Deleting namespace: azul"
         kubectl delete namespace azul --timeout=120s 2>/dev/null || true
-    else
-        log "Namespace azul not found, skipping"
     fi
 }
 
 uninstall_infra() {
     log ""
     log "--- Uninstalling azul infra ---"
-
-    # Uninstall azul-infra helm release
     if helm status azul-infra -n azul-infra >/dev/null 2>&1; then
-        if helm uninstall azul-infra -n azul-infra --timeout 5m; then
-            log "Helm release 'azul-infra' uninstalled"
-        else
-            log_err "Failed to uninstall azul-infra release"
-        fi
-    else
-        log "Helm release 'azul-infra' not found, skipping"
+        helm uninstall azul-infra -n azul-infra --timeout 5m && log "azul-infra uninstalled" || log_err "Failed to uninstall azul-infra"
     fi
-
-    # Delete PVCs in azul-infra
     if kubectl get namespace azul-infra >/dev/null 2>&1; then
         local pvcs
         pvcs=$(kubectl get pvc -n azul-infra -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
-        if [ -n "$pvcs" ]; then
-            for pvc in $pvcs; do
-                log "Deleting PVC: azul-infra/$pvc"
-                kubectl delete pvc "$pvc" -n azul-infra --timeout=60s 2>/dev/null || true
-            done
-        fi
-
+        for pvc in $pvcs; do
+            log "Deleting PVC: azul-infra/$pvc"
+            kubectl delete pvc "$pvc" -n azul-infra --timeout=60s 2>/dev/null || true
+        done
         log "Deleting namespace: azul-infra"
         kubectl delete namespace azul-infra --timeout=120s 2>/dev/null || true
-    else
-        log "Namespace azul-infra not found, skipping"
     fi
 
-    # Uninstall operators
-    if helm status strimzi-kafka-operator -n kafka >/dev/null 2>&1; then
-        helm uninstall strimzi-kafka-operator -n kafka --timeout 3m && \
-            log "Strimzi operator uninstalled" || \
-            log_err "Failed to uninstall Strimzi"
-    else
-        log "Strimzi operator not found, skipping"
-    fi
-
-    if helm status opensearch-operator -n opensearch-operator >/dev/null 2>&1; then
-        helm uninstall opensearch-operator -n opensearch-operator --timeout 3m && \
-            log "OpenSearch operator uninstalled" || \
-            log_err "Failed to uninstall OpenSearch operator"
-    else
-        log "OpenSearch operator not found, skipping"
-    fi
+    for rel_ns in "strimzi-kafka-operator:kafka" "opensearch-operator:opensearch-operator"; do
+        local rel="${rel_ns%%:*}" ns="${rel_ns##*:}"
+        if helm status "$rel" -n "$ns" >/dev/null 2>&1; then
+            helm uninstall "$rel" -n "$ns" --timeout 3m && log "$rel uninstalled" || log_err "Failed to uninstall $rel"
+        fi
+    done
 
     # Delete CRDs
-    local strimzi_crds
-    strimzi_crds=$(kubectl get crds -o name 2>/dev/null | grep "strimzi.io" || true)
-    if [ -n "$strimzi_crds" ]; then
-        log "Deleting Strimzi CRDs..."
-        echo "$strimzi_crds" | while read -r crd; do
-            kubectl delete "$crd" --timeout=30s 2>/dev/null || true
-        done
-    fi
+    for pattern in strimzi.io opensearch; do
+        local crds
+        crds=$(kubectl get crds -o name 2>/dev/null | grep "$pattern" || true)
+        if [ -n "$crds" ]; then
+            log "Deleting $pattern CRDs..."
+            echo "$crds" | while read -r crd; do kubectl delete "$crd" --timeout=30s 2>/dev/null || true; done
+        fi
+    done
 
-    local os_crds
-    os_crds=$(kubectl get crds -o name 2>/dev/null | grep "opensearch" || true)
-    if [ -n "$os_crds" ]; then
-        log "Deleting OpenSearch CRDs..."
-        echo "$os_crds" | while read -r crd; do
-            kubectl delete "$crd" --timeout=30s 2>/dev/null || true
-        done
-    fi
-
-    # Delete operator namespaces
     for ns in kafka opensearch-operator; do
         if kubectl get namespace "$ns" >/dev/null 2>&1; then
             log "Deleting namespace: $ns"
@@ -845,15 +817,13 @@ uninstall_infra() {
         fi
     done
 
-    # Clean CoreDNS
     clean_coredns
 }
 
 clean_coredns() {
     local corefile
     corefile=$(kubectl get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}' 2>/dev/null || true)
-
-    if echo "$corefile" | grep -q "${KEYCLOAK_HOST}"; then
+    if echo "$corefile" | grep -q "${KEYCLOAK_HOST:-keycloak-azul}"; then
         log "Removing azul hosts block from CoreDNS..."
         local new_corefile
         new_corefile=$(echo "$corefile" | python3 -c "
@@ -906,7 +876,6 @@ cmd_status() {
         *)   sections=("$section") ;;
     esac
 
-    # Helm releases
     log ""
     log "--- Helm Releases ---"
     helm list -n azul-infra 2>/dev/null | head -5 || log "  (none in azul-infra)"
@@ -917,23 +886,16 @@ cmd_status() {
     for s in "${sections[@]}"; do
         log ""
         log "--- Section: $s ---"
-
         case "$s" in
             infra)
-                log "Namespace: azul-infra"
                 if kubectl get namespace azul-infra >/dev/null 2>&1; then
                     local total running
                     total=$(kubectl get pods -n azul-infra --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
                     running=$(kubectl get pods -n azul-infra --no-headers 2>/dev/null | grep -c "Running") || running=0
-                    log "  Pods: $running running / $total total"
-                    kubectl get pods -n azul-infra --no-headers 2>/dev/null | while read -r line; do
-                        log "    $line"
-                    done
+                    log "  azul-infra: $running running / $total total"
                 else
-                    log "  Namespace does not exist"
+                    log "  azul-infra: namespace does not exist"
                 fi
-
-                log "Operators:"
                 for op_ns in kafka opensearch-operator; do
                     if kubectl get namespace "$op_ns" >/dev/null 2>&1; then
                         local op_pods
@@ -944,48 +906,39 @@ cmd_status() {
                     fi
                 done
                 ;;
-
             app)
-                log "Namespace: azul"
                 if kubectl get namespace azul >/dev/null 2>&1; then
                     local core_pods
                     core_pods=$(kubectl get pods -n azul --no-headers 2>/dev/null | grep -v "^plugin-" | grep -v "Completed" | wc -l)
                     log "  Core pods: $core_pods"
                 else
-                    log "  Namespace does not exist"
+                    log "  azul: namespace does not exist"
                 fi
                 ;;
-
             plugins)
-                log "Namespace: azul (plugin deployments)"
                 if kubectl get namespace azul >/dev/null 2>&1; then
-                    local plugin_pods
+                    local plugin_pods total_pods
                     plugin_pods=$(kubectl get pods -n azul --no-headers 2>/dev/null | grep "^plugin-" | wc -l)
-                    local total_pods
                     total_pods=$(kubectl get pods -n azul --no-headers 2>/dev/null | grep -v "Completed" | wc -l)
-                    log "  Plugin pods: $plugin_pods"
-                    log "  Total pods: $total_pods"
+                    log "  Plugin pods: $plugin_pods / Total: $total_pods"
                 else
-                    log "  Namespace does not exist"
+                    log "  azul: namespace does not exist"
                 fi
                 ;;
         esac
     done
 
-    # Registry status
     log ""
     log "--- Registry ---"
     if curl -sf --connect-timeout 3 "http://${REGISTRY}/v2/" >/dev/null 2>&1; then
-        local catalog
-        catalog=$(curl -sf "http://${REGISTRY}/v2/_catalog" 2>/dev/null || echo '{"repositories":[]}')
         local repo_count
-        repo_count=$(echo "$catalog" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('repositories',[])))" 2>/dev/null || echo "0")
+        repo_count=$(curl -sf "http://${REGISTRY}/v2/_catalog" 2>/dev/null \
+            | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('repositories',[])))" 2>/dev/null || echo "0")
         log "  Registry at ${REGISTRY}: $repo_count repositories"
     else
         log "  Registry at ${REGISTRY}: unreachable"
     fi
 
-    # File server status
     log ""
     log "--- File Server ---"
     if curl -sf --connect-timeout 3 "http://${FILESERVER}/" >/dev/null 2>&1; then
@@ -1000,70 +953,35 @@ cmd_status() {
 # =================================================================
 
 usage() {
-    echo "AZUL Deployment Framework"
-    echo ""
-    echo "Usage: $0 <command> [section] [--force]"
-    echo ""
-    echo "Commands:"
-    echo "  sync                    Sync files from file server (${FILESERVER})"
-    echo "  validate [section]      Check registry for required images"
-    echo "  push     [section]      Pull upstream images and push to registry"
-    echo "  install  [section]      Full install with pre-checks"
-    echo "  uninstall [section]     Clean uninstall"
-    echo "  status   [section]      Show current state"
-    echo ""
-    echo "Sections: infra | app | plugins | all (default: all)"
-    echo ""
-    echo "Options:"
-    echo "  --force     Skip confirmation prompts"
-    echo ""
-    echo "Examples:"
-    echo ""
-    echo "  # Sync files from file server"
-    echo "  $0 sync"
-    echo ""
-    echo "  # Validate registry images"
-    echo "  $0 validate all"
-    echo "  $0 validate infra"
-    echo "  $0 validate app"
-    echo "  $0 validate plugins"
-    echo ""
-    echo "  # Push images to private registry"
-    echo "  $0 push all"
-    echo "  $0 push infra"
-    echo "  $0 push app"
-    echo "  $0 push plugins"
-    echo "  $0 push all --force"
-    echo ""
-    echo "  # Install (pre-checks + deploy)"
-    echo "  $0 install all"
-    echo "  $0 install infra"
-    echo "  $0 install app"
-    echo "  $0 install plugins"
-    echo "  $0 install all --force"
-    echo ""
-    echo "  # Uninstall"
-    echo "  $0 uninstall all"
-    echo "  $0 uninstall infra"
-    echo "  $0 uninstall app"
-    echo "  $0 uninstall plugins"
-    echo "  $0 uninstall all --force"
-    echo ""
-    echo "  # Status"
-    echo "  $0 status"
-    echo "  $0 status all"
-    echo "  $0 status infra"
-    echo "  $0 status app"
-    echo "  $0 status plugins"
-    echo ""
-    echo "  # Typical full deploy workflow"
-    echo "  $0 sync                  # 1. Get latest files"
-    echo "  $0 validate all          # 2. Check images"
-    echo "  $0 push all              # 3. Push missing images"
-    echo "  $0 install infra         # 4. Deploy infrastructure"
-    echo "  $0 install app           # 5. Deploy application"
-    echo "  $0 install plugins       # 6. Deploy plugins"
-    echo "  $0 status all            # 7. Verify everything"
+    cat <<'USAGE'
+AZUL Deployment Framework
+
+Usage: azul-framework.sh <command> [args] [--force]
+
+Commands:
+  sync <service-ip> [port]   Sync files from file server
+  validate [section]         Check registry for required images
+  push     [section]         Pull upstream images and push to registry
+  install  [section]         Full install with pre-checks
+  uninstall [section]        Clean uninstall
+  status   [section]         Show current state
+
+Sections: infra | app | plugins | all (default: all)
+
+Bootstrap (fresh machine):
+  curl -o azul-framework.sh http://<ip>:8888/AZUL/azul-framework.sh
+  chmod +x azul-framework.sh
+  ./azul-framework.sh sync <service-ip>
+
+Full deploy workflow:
+  ./azul-framework.sh sync 192.168.66.41      # 1. Get files
+  ./azul-framework.sh validate all             # 2. Check images
+  ./azul-framework.sh push all                 # 3. Push missing
+  ./azul-framework.sh install infra            # 4. Infrastructure
+  ./azul-framework.sh install app              # 5. Application
+  ./azul-framework.sh install plugins          # 6. Plugins
+  ./azul-framework.sh status all               # 7. Verify
+USAGE
     exit 1
 }
 
@@ -1071,20 +989,30 @@ usage() {
 # MAIN
 # =================================================================
 
-# Parse arguments
 CMD="${1:-}"
-SECTION="${2:-all}"
+SECTION="all"
+SYNC_SERVER_IP=""
+SYNC_SERVER_PORT=""
+
+# Parse arguments based on command
+case "$CMD" in
+    sync)
+        SYNC_SERVER_IP="${2:-}"
+        SYNC_SERVER_PORT="${3:-}"
+        ;;
+    validate|push|install|uninstall|status)
+        SECTION="${2:-all}"
+        ;;
+esac
 
 # Check for --force flag in any position
 for arg in "$@"; do
     [ "$arg" = "--force" ] && FORCE=true
 done
-
-# Adjust SECTION if it's --force
 [ "$SECTION" = "--force" ] && SECTION="all"
 
 # Initialize log
-mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 log "--- azul-framework.sh $* ---"
 
 case "$CMD" in
